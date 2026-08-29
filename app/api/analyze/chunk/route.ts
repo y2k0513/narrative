@@ -15,7 +15,7 @@ export async function POST(request: Request) {
     if (!text.trim()) {
       return NextResponse.json({ error: "분석할 텍스트가 없습니다." }, { status: 400 });
     }
-    if (text.length > 240_000) {
+    if (text.length > 120_000) {
       return NextResponse.json({ error: "분석 배치가 너무 큽니다. 브라우저에서 더 작게 분할해 주세요." }, { status: 413 });
     }
 
@@ -25,7 +25,7 @@ export async function POST(request: Request) {
       schemaName: "research_chunk_analysis",
       schema: researchChunkSchema as unknown as Record<string, unknown>,
       reasoningEffort: "low",
-      maxOutputTokens: 14000,
+      maxOutputTokens: 4500,
       instructions: `
 당신은 Research2Report의 Chunk Research Parser다.
 브라우저에서 미리 텍스트로 변환된 연구자료 일부를 분석한다. 보고서를 쓰지 말고, 이 배치에서 실제로 확인 가능한 연구 사실만 구조화한다.
@@ -52,9 +52,21 @@ export async function POST(request: Request) {
     return NextResponse.json(result);
   } catch (error) {
     console.error(error);
+    const err = error as { status?: number; headers?: Headers | Record<string, string>; message?: string };
+    const status = err?.status === 429 ? 429 : 500;
+    const headers = new Headers();
+    if (status === 429) {
+      const sourceHeaders = err?.headers;
+      let retryAfter: string | null = null;
+      if (sourceHeaders instanceof Headers) retryAfter = sourceHeaders.get("retry-after");
+      else if (sourceHeaders && typeof sourceHeaders === "object") {
+        retryAfter = sourceHeaders["retry-after"] || sourceHeaders["Retry-After"] || null;
+      }
+      if (retryAfter) headers.set("Retry-After", retryAfter);
+    }
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "연구자료 배치 분석 중 오류가 발생했습니다." },
-      { status: 500 },
+      { error: err?.message || "연구자료 배치 분석 중 오류가 발생했습니다." },
+      { status, headers },
     );
   }
 }

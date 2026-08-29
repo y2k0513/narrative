@@ -41,10 +41,10 @@ const MAX_SEGMENT_CHARS = 14_000;
 // Large machine-readable files are not keyword-filtered anymore.
 // Every row/line is scanned in the browser, then represented by bounded
 // coverage digests plus raw excerpts. Human-written documents stay raw.
-const FULL_COVERAGE_COMPRESSION_THRESHOLD = 140_000;
-const TARGET_LOG_BLOCKS = 160;
-const TARGET_CODE_BLOCKS = 120;
-const TARGET_CSV_BLOCKS = 120;
+const FULL_COVERAGE_COMPRESSION_THRESHOLD = 28_000;
+const TARGET_LOG_BLOCKS = 80;
+const TARGET_CODE_BLOCKS = 70;
+const TARGET_CSV_BLOCKS = 60;
 
 export type PreprocessResult = {
   sources: ParsedSource[];
@@ -228,7 +228,7 @@ function compressLogFullCoverage(text: string): { segments: ParsedSegment[]; com
     return { segments: chunkLines(text, 30), compressed: false, blocks: 0, lineCount: lines.length };
   }
 
-  const blockSize = adaptiveBlockSize(lines.length, TARGET_LOG_BLOCKS, 300);
+  const blockSize = adaptiveBlockSize(lines.length, TARGET_LOG_BLOCKS, 600);
   const segments: ParsedSegment[] = [];
   let blockCount = 0;
 
@@ -278,12 +278,12 @@ function compressLogFullCoverage(text: string): { segments: ParsedSegment[]; com
 
     scored
       .sort((a, b) => b.score - a.score || a.index - b.index)
-      .slice(0, 8)
+      .slice(0, 5)
       .forEach(({ index }) => addRange(selected, index - 1, index + 1, lines.length));
 
     const topStats = Array.from(numericStats.entries())
       .sort((a, b) => b[1].count - a[1].count)
-      .slice(0, 8);
+      .slice(0, 6);
     topStats.forEach(([, stat]) => {
       addRange(selected, stat.minIndex - 1, stat.minIndex + 1, lines.length);
       addRange(selected, stat.maxIndex - 1, stat.maxIndex + 1, lines.length);
@@ -313,7 +313,7 @@ function compressCodeFullCoverage(text: string): { segments: ParsedSegment[]; co
     return { segments: chunkLines(text, 40), compressed: false, blocks: 0, lineCount: lines.length };
   }
 
-  const blockSize = adaptiveBlockSize(lines.length, TARGET_CODE_BLOCKS, 220);
+  const blockSize = adaptiveBlockSize(lines.length, TARGET_CODE_BLOCKS, 420);
   const segments: ParsedSegment[] = [];
   let blockCount = 0;
 
@@ -326,7 +326,7 @@ function compressCodeFullCoverage(text: string): { segments: ParsedSegment[]; co
     // Keep a small central raw window from every block even when it has no obvious keyword.
     if (indexes.length) {
       const center = indexes[Math.floor(indexes.length / 2)];
-      addRange(selected, center - 5, center + 5, lines.length);
+      addRange(selected, center - 3, center + 3, lines.length);
     }
 
     const scored: Array<{ index: number; score: number }> = [];
@@ -353,8 +353,8 @@ function compressCodeFullCoverage(text: string): { segments: ParsedSegment[]; co
 
     scored
       .sort((a, b) => b.score - a.score || a.index - b.index)
-      .slice(0, 12)
-      .forEach(({ index }) => addRange(selected, index - 2, index + 4, lines.length));
+      .slice(0, 8)
+      .forEach(({ index }) => addRange(selected, index - 2, index + 3, lines.length));
 
     const digest = [
       `Full Coverage code block: lines ${start + 1}-${end} (${end - start} lines; ${indexes.length} non-empty).`,
@@ -443,7 +443,7 @@ function compressCsvFullCoverage(
   inputChars: number,
 ): { segments: ParsedSegment[]; compressed: boolean; blocks: number; rowCount: number } {
   const rowCount = data.length;
-  const shouldCompress = inputChars > FULL_COVERAGE_COMPRESSION_THRESHOLD || rowCount > 900;
+  const shouldCompress = inputChars > FULL_COVERAGE_COMPRESSION_THRESHOLD || rowCount > 250;
   if (!shouldCompress) {
     return {
       segments: [
@@ -456,7 +456,7 @@ function compressCsvFullCoverage(
     };
   }
 
-  const blockSize = adaptiveBlockSize(rowCount, TARGET_CSV_BLOCKS, 250);
+  const blockSize = adaptiveBlockSize(rowCount, TARGET_CSV_BLOCKS, 500);
   const segments: ParsedSegment[] = [];
   let blockCount = 0;
   const globalStats = new Map<string, NumericStat>();
@@ -498,11 +498,11 @@ function compressCsvFullCoverage(
     }
     candidates
       .sort((a, b) => b.score - a.score || a.index - b.index)
-      .slice(0, 5)
+      .slice(0, 4)
       .forEach(({ index }) => selected.add(index));
 
     const preferred = preferredNumericColumns(columns, blockStats, 10);
-    preferred.slice(0, 6).forEach((column) => {
+    preferred.slice(0, 4).forEach((column) => {
       const stat = blockStats.get(column);
       if (!stat) return;
       selected.add(stat.minIndex);
@@ -681,11 +681,12 @@ async function parseResearchBlob(input: NamedBlob, sourceId: string): Promise<Pa
     const raw = await input.blob.text();
     const parsed = JSON.parse(raw);
     const normalized = JSON.stringify(parsed, null, 2);
+    const compact = compressLogFullCoverage(normalized);
     return {
-      source: { source_id: sourceId, name, type, segments: chunkLines(normalized, 35) },
+      source: { source_id: sourceId, name, type, segments: compact.segments },
       inputChars: raw.length,
-      compressed: false,
-      coverage: { text_lines_scanned: normalized.split("\n").length },
+      compressed: compact.compressed,
+      coverage: { text_lines_scanned: compact.lineCount, coverage_blocks: compact.blocks },
     };
   }
 
@@ -693,11 +694,12 @@ async function parseResearchBlob(input: NamedBlob, sourceId: string): Promise<Pa
     const raw = await input.blob.text();
     const parsed = YAML.parse(raw);
     const normalized = JSON.stringify(parsed, null, 2);
+    const compact = compressLogFullCoverage(normalized);
     return {
-      source: { source_id: sourceId, name, type, segments: chunkLines(normalized, 35) },
+      source: { source_id: sourceId, name, type, segments: compact.segments },
       inputChars: raw.length,
-      compressed: false,
-      coverage: { text_lines_scanned: normalized.split("\n").length },
+      compressed: compact.compressed,
+      coverage: { text_lines_scanned: compact.lineCount, coverage_blocks: compact.blocks },
     };
   }
 

@@ -37,7 +37,9 @@ const MAX_FOLDER_FILE_SIZE = 40 * 1024 * 1024;
 const MAX_MANUAL_ZIP_SIZE = 80 * 1024 * 1024;
 const MAX_ANALYSIS_BATCHES = 100;
 const FINALIZE_GROUP_SIZE = 12;
-const ANALYSIS_CONCURRENCY = 4;
+const ANALYSIS_BATCH_CHARS = 100_000;
+const MAX_RATE_LIMIT_RETRIES = 6;
+const ANALYSIS_CONCURRENCY = 2;
 
 function displayPath(file: File) {
   const relativePath = (file as BrowserFile).webkitRelativePath;
@@ -63,6 +65,42 @@ async function readJsonOrThrow(response: Response) {
   }
   if (!response.ok) throw new Error(json?.error || text || "요청에 실패했습니다.");
   return json;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryDelayMs(response: Response, bodyText: string, attempt: number) {
+  const retryAfter = response.headers.get("retry-after");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds * 1000) + 500;
+  }
+  const match = bodyText.match(/try again in\s+([0-9.]+)s/i);
+  if (match) return Math.ceil(Number(match[1]) * 1000) + 500;
+  return Math.min(30_000, 2_000 * 2 ** attempt) + Math.floor(Math.random() * 700);
+}
+
+async function postJsonWithRateLimitRetry(url: string, payload: unknown, onWait?: (seconds: number) => void) {
+  for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (response.status !== 429) return readJsonOrThrow(response);
+
+    const bodyText = await response.text();
+    if (attempt === MAX_RATE_LIMIT_RETRIES) {
+      throw new Error(bodyText || "OpenAI rate limit에 반복적으로 도달했습니다.");
+    }
+    const delay = retryDelayMs(response, bodyText, attempt);
+    onWait?.(Math.ceil(delay / 1000));
+    await sleep(delay);
+  }
+  throw new Error("OpenAI rate limit 재시도에 실패했습니다.");
 }
 
 export default function HomePage() {
@@ -169,7 +207,7 @@ export default function HomePage() {
         throw new Error("분석 가능한 텍스트를 찾지 못했습니다.");
       }
 
-      const batches = buildAnalysisBatches(preprocessed.sources, 220_000);
+      const batches = buildAnalysisBatches(preprocessed.sources, ANALYSIS_BATCH_CHARS);
       if (!batches.length) throw new Error("분석할 텍스트 배치를 만들지 못했습니다.");
       if (batches.length > MAX_ANALYSIS_BATCHES) {
         throw new Error(
@@ -202,12 +240,14 @@ export default function HomePage() {
           const index = nextBatchIndex++;
           if (index >= batches.length) return;
           const batch = batches[index];
-          const response = await fetch("/api/analyze/chunk", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ batchId: batch.batch_id, text: batch.text }),
-          });
-          partials[index] = (await readJsonOrThrow(response)) as ResearchChunkAnalysis;
+          partials[index] = (await postJsonWithRateLimitRetry(
+            "/api/analyze/chunk",
+            { batchId: batch.batch_id, text: batch.text },
+            (seconds) =>
+              setAnalysisProgress(
+                `OpenAI TPM 한도 조절 중 · ${seconds}초 대기 후 배치 ${index + 1}/${batches.length} 자동 재시도...`,
+              ),
+          )) as ResearchChunkAnalysis;
           completedBatches++;
           setAnalysisProgress(
             `Full Coverage Scan 완료 · ${compressionLabel} · ${(preprocessed.extractedChars / 1_000_000).toFixed(2)}M analysis chars · AI 배치 ${completedBatches}/${batches.length} 완료 (${ANALYSIS_CONCURRENCY}개 병렬)`,

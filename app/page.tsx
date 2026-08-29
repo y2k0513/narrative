@@ -35,7 +35,8 @@ type ReportMode = "existing" | "new";
 const MAX_SELECTED_FILES = 150;
 const MAX_FOLDER_FILE_SIZE = 40 * 1024 * 1024;
 const MAX_MANUAL_ZIP_SIZE = 80 * 1024 * 1024;
-const MAX_ANALYSIS_BATCHES = 30;
+const MAX_ANALYSIS_BATCHES = 100;
+const FINALIZE_GROUP_SIZE = 12;
 
 function displayPath(file: File) {
   const relativePath = (file as BrowserFile).webkitRelativePath;
@@ -171,7 +172,13 @@ export default function HomePage() {
       if (!batches.length) throw new Error("분석할 텍스트 배치를 만들지 못했습니다.");
       if (batches.length > MAX_ANALYSIS_BATCHES) {
         throw new Error(
-          `분석 텍스트가 너무 큽니다 (${batches.length}개 배치). 현재 MVP는 최대 ${MAX_ANALYSIS_BATCHES}개 배치까지 지원합니다. 대형 로그/CSV 중 불필요한 파일을 제외해 주세요.`,
+          `분석 텍스트가 매우 큽니다 (${batches.length}개 배치). 현재 안전 한도는 ${MAX_ANALYSIS_BATCHES}개입니다. 대형 로그/CSV/코드 중 불필요한 파일을 제외해 주세요.`,
+        );
+      }
+
+      if (batches.length > 30) {
+        setAnalysisProgress(
+          `대형 프로젝트 감지 · ${batches.length}개 AI 배치 · 분석 시간이 길어지고 API 사용량이 증가할 수 있습니다.`,
         );
       }
 
@@ -201,12 +208,53 @@ export default function HomePage() {
         warnings: partial.warnings.slice(0, 10),
       }));
 
-      const finalizeResponse = await fetch("/api/analyze/finalize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chunks: digest, maxConcepts: 30 }),
-      });
-      const finalized = (await readJsonOrThrow(finalizeResponse)) as ResearchFinalizeResult;
+      async function finalizeChunks(chunks: unknown[], label?: string) {
+        if (label) setAnalysisProgress(label);
+        const response = await fetch("/api/analyze/finalize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chunks, maxConcepts: 30 }),
+        });
+        return (await readJsonOrThrow(response)) as ResearchFinalizeResult;
+      }
+
+      let finalized: ResearchFinalizeResult;
+
+      if (digest.length <= FINALIZE_GROUP_SIZE) {
+        finalized = await finalizeChunks(
+          digest,
+          `배치 ${batches.length}개 분석 완료 · Research Overview 통합 중...`,
+        );
+      } else {
+        const mergedGroups: unknown[] = [];
+        const groupCount = Math.ceil(digest.length / FINALIZE_GROUP_SIZE);
+
+        for (let start = 0; start < digest.length; start += FINALIZE_GROUP_SIZE) {
+          const groupIndex = Math.floor(start / FINALIZE_GROUP_SIZE) + 1;
+          const group = digest.slice(start, start + FINALIZE_GROUP_SIZE);
+          const merged = await finalizeChunks(
+            group,
+            `1차 통합 ${groupIndex}/${groupCount} · ${group.length}개 배치 요약 중...`,
+          );
+
+          mergedGroups.push({
+            batch_id: `MERGE${String(groupIndex).padStart(2, "0")}`,
+            research_topic: merged.research_topic,
+            research_topic_en: merged.research_topic_en,
+            objective: merged.objective,
+            chunk_summary: merged.summary,
+            methods: merged.methods.slice(0, 24),
+            experiments: merged.experiments.slice(0, 35),
+            concepts: merged.concepts.slice(0, 20),
+            warnings: merged.warnings.slice(0, 15),
+          });
+        }
+
+        finalized = await finalizeChunks(
+          mergedGroups,
+          `2차 통합 · ${groupCount}개 중간 요약을 전체 Research Overview로 병합 중...`,
+        );
+      }
 
       const sourceNameMap = new Map(preprocessed.sources.map((source) => [source.source_id, source.name]));
       const evidence: Evidence[] = [];

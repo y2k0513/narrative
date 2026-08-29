@@ -1,0 +1,11 @@
+연구 목표: 비접촉 환경 음성을 이용한 3-class 수면 단계 분류 가능성을 확인한다.
+
+E01은 단일 epoch를 사용하는 baseline이다.
+E02부터 temporal context를 추가했다.
+E03에서는 context 11을 사용했고 validation Macro F1 0.546, test Macro F1 0.477을 기록했다.
+E04에서는 context를 21로 늘렸지만 E03보다 test Macro F1이 낮았다.
+
+관찰 메모:
+- 단일 epoch 대비 일정 범위의 temporal context를 사용할 때 성능이 상승했다.
+- context를 계속 늘린다고 성능이 계속 상승하지는 않았다.
+- 원인에 대해서는 추가 검증이 필요하며, 현재 자료만으로 인과를 단정하지 않는다.

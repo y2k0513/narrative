@@ -1,0 +1,9 @@
+{
+  "task": "3-class sleep stage classification",
+  "input": "environmental audio",
+  "epoch_seconds": 30,
+  "sample_rate": 16000,
+  "classes": ["Wake", "NREM", "REM"],
+  "optimizer": "Adam",
+  "learning_rate": 0.0001
+}

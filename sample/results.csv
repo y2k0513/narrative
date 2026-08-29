@@ -1,0 +1,5 @@
+experiment_id,model,context,loss,val_f1,test_f1
+E01,CNN,1,CrossEntropy,0.501,0.443
+E02,CNN,5,CrossEntropy,0.528,0.462
+E03,CNN,11,CrossEntropy,0.546,0.477
+E04,CNN,21,CrossEntropy,0.538,0.469

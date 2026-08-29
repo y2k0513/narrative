@@ -11,6 +11,7 @@ import {
   preprocessResearchFiles,
   shouldIgnoreProjectPath,
 } from "@/lib/client-file-parser";
+import type { AnalysisDepth } from "@/lib/client-file-parser";
 import type {
   Evidence,
   GroundedReport,
@@ -37,7 +38,25 @@ const MAX_FOLDER_FILE_SIZE = 40 * 1024 * 1024;
 const MAX_MANUAL_ZIP_SIZE = 80 * 1024 * 1024;
 const MAX_ANALYSIS_BATCHES = 100;
 const FINALIZE_GROUP_SIZE = 12;
-const TARGET_ANALYSIS_BATCHES = 3;
+const ANALYSIS_PROFILES: Record<AnalysisDepth, {
+  label: string;
+  description: string;
+  targetBatches: number;
+  targetChars: number;
+}> = {
+  fast: {
+    label: "빠른 분석",
+    description: "전체 자료를 전수 스캔한 뒤 핵심 Evidence 중심으로 압축 · 약 2~3 AI 배치",
+    targetBatches: 3,
+    targetChars: 360_000,
+  },
+  precise: {
+    label: "정밀 분석",
+    description: "원문 Evidence와 실험 조건을 약 2배 더 보존 · 약 4~5 AI 배치",
+    targetBatches: 5,
+    targetChars: 680_000,
+  },
+};
 const MIN_ANALYSIS_BATCH_CHARS = 110_000;
 const MAX_ANALYSIS_BATCH_CHARS = 150_000;
 const MAX_RATE_LIMIT_RETRIES = 6;
@@ -122,6 +141,7 @@ export default function HomePage() {
   const [error, setError] = useState("");
   const [uploadNotice, setUploadNotice] = useState("");
   const [analysisProgress, setAnalysisProgress] = useState("");
+  const [analysisDepth, setAnalysisDepth] = useState<AnalysisDepth>("fast");
 
   const evidenceMap = useMemo(() => {
     const map = new Map<string, Evidence>();
@@ -204,7 +224,11 @@ export default function HomePage() {
     setSelectedClaim(null);
 
     try {
-      const preprocessed = await preprocessResearchFiles(files, displayPath);
+      const profile = ANALYSIS_PROFILES[analysisDepth];
+      const preprocessed = await preprocessResearchFiles(files, displayPath, {
+        depth: analysisDepth,
+        analysisTargetChars: profile.targetChars,
+      });
       if (!preprocessed.sources.length) {
         throw new Error("분석 가능한 텍스트를 찾지 못했습니다.");
       }
@@ -216,7 +240,7 @@ export default function HomePage() {
         MAX_ANALYSIS_BATCH_CHARS,
         Math.max(
           MIN_ANALYSIS_BATCH_CHARS,
-          Math.ceil(preprocessed.extractedChars / TARGET_ANALYSIS_BATCHES / 5_000) * 5_000,
+          Math.ceil(preprocessed.extractedChars / profile.targetBatches / 5_000) * 5_000,
         ),
       );
       const batches = buildAnalysisBatches(preprocessed.sources, adaptiveBatchChars);
@@ -240,7 +264,7 @@ export default function HomePage() {
         preprocessed.coverage.notebook_cells_scanned;
 
       setAnalysisProgress(
-        `Full Coverage Scan 완료 · ${coverageUnits.toLocaleString()} units scanned · ${compressionLabel} · ${batches.length}개 AI 배치 (${Math.round(adaptiveBatchChars / 1000)}k chars/batch) · ${ANALYSIS_CONCURRENCY}개 병렬 분석`,
+        `${profile.label} · Full Coverage Scan 완료 · ${coverageUnits.toLocaleString()} units scanned · ${compressionLabel} · ${batches.length}개 AI 배치 (${Math.round(adaptiveBatchChars / 1000)}k chars/batch) · ${ANALYSIS_CONCURRENCY}개 병렬 분석`,
       );
 
       const partials = new Array<ResearchChunkAnalysis>(batches.length);
@@ -254,7 +278,7 @@ export default function HomePage() {
           const batch = batches[index];
           partials[index] = (await postJsonWithRateLimitRetry(
             "/api/analyze/chunk",
-            { batchId: batch.batch_id, text: batch.text },
+            { batchId: batch.batch_id, text: batch.text, analysisDepth },
             (seconds) =>
               setAnalysisProgress(
                 `OpenAI TPM 한도 조절 중 · ${seconds}초 대기 후 배치 ${index + 1}/${batches.length} 자동 재시도...`,
@@ -262,7 +286,7 @@ export default function HomePage() {
           )) as ResearchChunkAnalysis;
           completedBatches++;
           setAnalysisProgress(
-            `Full Coverage Scan 완료 · ${compressionLabel} · ${(preprocessed.extractedChars / 1_000_000).toFixed(2)}M analysis chars · AI 배치 ${completedBatches}/${batches.length} 완료 (${ANALYSIS_CONCURRENCY}개 병렬)`,
+            `${profile.label} · Full Coverage Scan 완료 · ${compressionLabel} · ${(preprocessed.extractedChars / 1_000_000).toFixed(2)}M analysis chars · AI 배치 ${completedBatches}/${batches.length} 완료 (${ANALYSIS_CONCURRENCY}개 병렬)`,
           );
         }
       };
@@ -272,14 +296,18 @@ export default function HomePage() {
 
       setAnalysisProgress(`배치 ${batches.length}개 병렬 분석 완료 · Research Overview 통합 중...`);
 
+      const digestLimits = analysisDepth === "precise"
+        ? { methods: 18, experiments: 30, findings: 22, concepts: 20, warnings: 14 }
+        : { methods: 12, experiments: 20, findings: 15, concepts: 15, warnings: 10 };
+
       const digest = partials.map((partial, index) => ({
         batch_id: batches[index]?.batch_id || `B${index + 1}`,
         chunk_summary: partial.chunk_summary,
-        methods: partial.methods.slice(0, 12),
-        experiments: partial.experiments.slice(0, 20),
-        findings: partial.findings.slice(0, 15).map((finding) => ({ text: finding.text, kind: finding.kind })),
-        concepts: partial.concepts.slice(0, 15),
-        warnings: partial.warnings.slice(0, 10),
+        methods: partial.methods.slice(0, digestLimits.methods),
+        experiments: partial.experiments.slice(0, digestLimits.experiments),
+        findings: partial.findings.slice(0, digestLimits.findings).map((finding) => ({ text: finding.text, kind: finding.kind })),
+        concepts: partial.concepts.slice(0, digestLimits.concepts),
+        warnings: partial.warnings.slice(0, digestLimits.warnings),
       }));
 
       async function finalizeChunks(chunks: unknown[], label?: string) {
@@ -287,7 +315,7 @@ export default function HomePage() {
         const response = await fetch("/api/analyze/finalize", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chunks, maxConcepts: 30 }),
+          body: JSON.stringify({ chunks, maxConcepts: 30, analysisDepth }),
         });
         return (await readJsonOrThrow(response)) as ResearchFinalizeResult;
       }
@@ -395,7 +423,7 @@ export default function HomePage() {
 
       setAnalysis(analysisResult);
       setAnalysisProgress(
-        `완료 · ${preprocessed.sources.length} files full-scanned · ${compressionLabel} · ${batches.length} AI batches · ${evidence.length} evidence`,
+        `${profile.label} 완료 · ${preprocessed.sources.length} files full-scanned · ${compressionLabel} · ${batches.length} AI batches · ${evidence.length} evidence`,
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : "분석 오류");
@@ -588,9 +616,36 @@ export default function HomePage() {
           </div>
         )}
 
+        <div className="analysis-depth-block">
+          <div className="analysis-depth-head">
+            <strong>분석 깊이</strong>
+            <span>{ANALYSIS_PROFILES[analysisDepth].description}</span>
+          </div>
+          <div className="mode-switch analysis-depth-switch">
+            <button
+              type="button"
+              className={analysisDepth === "fast" ? "mode-button active" : "mode-button"}
+              onClick={() => setAnalysisDepth("fast")}
+              disabled={busy !== null}
+            >
+              <strong>빠른 분석</strong>
+              <small>현재 기본 · 약 2~3 배치</small>
+            </button>
+            <button
+              type="button"
+              className={analysisDepth === "precise" ? "mode-button active" : "mode-button"}
+              onClick={() => setAnalysisDepth("precise")}
+              disabled={busy !== null}
+            >
+              <strong>정밀 분석</strong>
+              <small>Evidence 약 2배 보존 · 약 4~5 배치</small>
+            </button>
+          </div>
+        </div>
+
         <div className="actions">
           <button className="primary" onClick={analyze} disabled={!files.length || busy !== null}>
-            {busy === "analyze" ? "전처리/배치 분석 중..." : `연구자료 분석 (${files.length})`}
+            {busy === "analyze" ? `${ANALYSIS_PROFILES[analysisDepth].label} 진행 중...` : `${ANALYSIS_PROFILES[analysisDepth].label} 시작 (${files.length})`}
           </button>
         </div>
       </section>

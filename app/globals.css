@@ -166,3 +166,16 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; line-height: 1.
   .mode-switch { grid-template-columns: 1fr; }
   .coverage-grid { grid-template-columns: repeat(2, 1fr); }
 }
+
+.analysis-depth-block { margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfe; }
+.analysis-depth-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; margin-bottom: 10px; }
+.analysis-depth-head strong { font-size: 13px; }
+.analysis-depth-head span { color: var(--muted); font-size: 11px; text-align: right; }
+.analysis-depth-switch { margin-bottom: 0; }
+.analysis-depth-switch .mode-button { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 3px; text-align: left; padding: 11px 14px; }
+.analysis-depth-switch .mode-button strong { font-size: 13px; }
+.analysis-depth-switch .mode-button small { font-size: 10px; opacity: 0.82; }
+@media (max-width: 720px) {
+  .analysis-depth-head { flex-direction: column; align-items: flex-start; }
+  .analysis-depth-head span { text-align: left; }
+}

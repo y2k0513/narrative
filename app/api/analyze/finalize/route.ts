@@ -11,8 +11,10 @@ export async function POST(request: Request) {
     const body = (await request.json()) as {
       chunks?: unknown[];
       maxConcepts?: number;
+      analysisDepth?: "fast" | "precise";
     };
     const chunks = Array.isArray(body.chunks) ? body.chunks : [];
+    const precise = body.analysisDepth === "precise";
     if (!chunks.length) {
       return NextResponse.json({ error: "통합할 chunk 분석 결과가 없습니다." }, { status: 400 });
     }
@@ -33,7 +35,7 @@ export async function POST(request: Request) {
       schemaName: "research_finalize",
       schema: researchFinalizeSchema as unknown as Record<string, unknown>,
       reasoningEffort: "low",
-      maxOutputTokens: 14000,
+      maxOutputTokens: precise ? 17000 : 14000,
       instructions: `
 당신은 Research2Report의 Research Merger다.
 여러 연구자료 chunk 분석 결과를 하나의 Research Overview로 통합한다.
@@ -48,6 +50,9 @@ export async function POST(request: Request) {
 7. Concept은 최대 ${maxConcepts}개를 반환한다.
 8. search_query는 OpenAlex에서 사용할 짧은 영어 검색어로 만든다.
 9. summary는 전체 연구 흐름을 이해할 수 있게 작성하되 과장하지 않는다.
+10. batch, chunk, coverage, digest, AI 분석, 압축률 등 Research2Report 내부 처리 구조를 연구 내용처럼 서술하지 않는다. "세 배치는", "이 chunk는" 같은 표현은 금지한다.
+11. 서로 다른 모델·전처리·threshold·평가 단위의 결과를 비교할 때는 조건 차이를 명시하고, 직접적인 우열로 단정하지 않는다.
+12. ${precise ? "정밀 분석에서는 모델 구조, 전처리, 실험 조건, threshold, aggregate/환자 수준 성능, 예외·실패 케이스를 가능한 한 구분해 더 상세히 통합한다." : "빠른 분석에서는 핵심 실험 흐름과 가장 중요한 결과를 우선해 간결하게 통합한다."}
 `,
       input: JSON.stringify({ chunks, maxConcepts }, null, 2),
     });

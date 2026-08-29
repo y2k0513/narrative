@@ -8,9 +8,10 @@ export const maxDuration = 90;
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as { batchId?: string; text?: string };
+    const body = (await request.json()) as { batchId?: string; text?: string; analysisDepth?: "fast" | "precise" };
     const batchId = String(body.batchId || "batch");
     const text = String(body.text || "");
+    const precise = body.analysisDepth === "precise";
 
     if (!text.trim()) {
       return NextResponse.json({ error: "분석할 텍스트가 없습니다." }, { status: 400 });
@@ -25,7 +26,7 @@ export async function POST(request: Request) {
       schemaName: "research_chunk_analysis",
       schema: researchChunkSchema as unknown as Record<string, unknown>,
       reasoningEffort: "none",
-      maxOutputTokens: 7000,
+      maxOutputTokens: precise ? 9000 : 7000,
       instructions: `
 당신은 Research2Report의 Chunk Research Parser다.
 브라우저에서 미리 텍스트로 변환된 연구자료 일부를 분석한다. 보고서를 쓰지 말고, 이 배치에서 실제로 확인 가능한 연구 사실만 구조화한다.
@@ -41,11 +42,11 @@ export async function POST(request: Request) {
 8. observed finding은 직접 확인되는 패턴, inferred finding은 해석으로 구분한다.
 9. temp_id는 이 배치 안에서 T001, T002처럼 유일하게 만든다.
 10. 문헌 검색에 유용한 Research Concept만 추출한다. 일반 단어는 제외한다.
-11. 같은 사실을 중복 Evidence로 과도하게 만들지 않는다. 보고서 검증에 유용한 핵심 Evidence만 최대 24개 정도로 제한한다. raw_quote는 근거가 되는 최소 구절만 사용하고 가능한 250자 이내로 짧게 유지한다.
-12. 방법은 최대 8개, 실험은 최대 12개, Finding은 최대 10개, Concept은 최대 10개를 우선한다. 긴 설명 대신 핵심 사실과 source 위치를 보존한다.
-13. warnings는 핵심 충돌/누락만 최대 6개 정도로 제한한다.
+11. 같은 사실을 중복 Evidence로 과도하게 만들지 않는다. ${precise ? "정밀 분석에서는 서로 다른 실험 조건·threshold·환자 수준 결과·예외 케이스를 구분하여 핵심 Evidence를 최대 40개 정도까지 보존한다." : "빠른 분석에서는 보고서 검증에 유용한 핵심 Evidence를 최대 24개 정도로 제한한다."} raw_quote는 근거가 되는 최소 구절만 사용하고 가능한 250자 이내로 짧게 유지한다.
+12. ${precise ? "정밀 분석: 방법 최대 14개, 실험 최대 20개, Finding 최대 16개, Concept 최대 14개를 우선하며 모델/전처리/threshold/평가 단위가 다른 실험은 가능한 한 분리한다." : "빠른 분석: 방법 최대 8개, 실험 최대 12개, Finding 최대 10개, Concept 최대 10개를 우선한다."} 긴 설명보다 핵심 사실과 source 위치를 보존한다.
+13. warnings는 ${precise ? "최대 10개" : "최대 6개"} 정도로 제한하고, 조건이 달라 직접 비교하기 어려운 실험은 경고한다.
 14. 자료가 불완전하거나 서로 충돌하면 warnings에 기록한다.
-15. chunk_summary는 RAW_EVIDENCE와 COVERAGE_DIGEST를 함께 이용해 이 배치가 전체 연구에서 어떤 내용을 담는지 3~5문장으로 압축한다. JSON 전체가 출력 한도 안에서 반드시 완결되도록 간결하게 작성한다.
+15. chunk_summary는 RAW_EVIDENCE와 COVERAGE_DIGEST를 함께 이용해 이 배치가 전체 연구에서 어떤 내용을 담는지 ${precise ? "5~7문장" : "3~5문장"}으로 정리한다. 연구 내용에는 batch/chunk/coverage/digest 같은 내부 처리 용어를 쓰지 않는다. JSON 전체가 출력 한도 안에서 반드시 완결되도록 작성한다.
 `,
       input: `[BATCH ${batchId}]\n${text}`,
     });

@@ -45,13 +45,55 @@ const FULL_COVERAGE_COMPRESSION_THRESHOLD = 22_000;
 // Full coverage means every row/line is scanned in the browser, not that every
 // raw character is sent to the model. These targets keep a compact digest +
 // representative raw evidence from every region of large machine-readable files.
-const TARGET_LOG_BLOCKS = 28;
-const TARGET_CODE_BLOCKS = 30;
-const TARGET_CSV_BLOCKS = 24;
-// Global guardrail after per-file full-coverage compression. Coverage digests from
-// every region are preserved; only redundant machine-readable RAW_EVIDENCE
-// excerpts are balanced if the project is still too large.
-const TARGET_AI_ANALYSIS_CHARS = 360_000;
+const FAST_LOG_BLOCKS = 28;
+const FAST_CODE_BLOCKS = 30;
+const FAST_CSV_BLOCKS = 24;
+const PRECISE_LOG_BLOCKS = 44;
+const PRECISE_CODE_BLOCKS = 48;
+const PRECISE_CSV_BLOCKS = 38;
+// Fast keeps the current balanced profile. Precise roughly doubles the AI context
+// and also preserves denser raw anchors inside each full-scanned machine file.
+const FAST_AI_ANALYSIS_CHARS = 360_000;
+const PRECISE_AI_ANALYSIS_CHARS = 680_000;
+
+export type AnalysisDepth = "fast" | "precise";
+
+export type PreprocessOptions = {
+  depth?: AnalysisDepth;
+  analysisTargetChars?: number;
+};
+
+function detailProfile(depth: AnalysisDepth) {
+  return depth === "precise"
+    ? {
+        logBlocks: PRECISE_LOG_BLOCKS,
+        codeBlocks: PRECISE_CODE_BLOCKS,
+        csvBlocks: PRECISE_CSV_BLOCKS,
+        logTopLines: 5,
+        logTopStats: 6,
+        logContext: 18,
+        codeTopLines: 6,
+        codeContextRadius: 2,
+        codeContext: 24,
+        csvTopRows: 4,
+        csvPreferredColumns: 10,
+        csvExtremaColumns: 4,
+      }
+    : {
+        logBlocks: FAST_LOG_BLOCKS,
+        codeBlocks: FAST_CODE_BLOCKS,
+        csvBlocks: FAST_CSV_BLOCKS,
+        logTopLines: 3,
+        logTopStats: 4,
+        logContext: 12,
+        codeTopLines: 4,
+        codeContextRadius: 1,
+        codeContext: 16,
+        csvTopRows: 2,
+        csvPreferredColumns: 6,
+        csvExtremaColumns: 2,
+      };
+}
 
 export type PreprocessResult = {
   sources: ParsedSource[];
@@ -238,13 +280,14 @@ function lineSignalScore(line: string, mode: "log" | "code") {
   return score;
 }
 
-function compressLogFullCoverage(text: string): { segments: ParsedSegment[]; compressed: boolean; blocks: number; lineCount: number } {
+function compressLogFullCoverage(text: string, depth: AnalysisDepth = "fast"): { segments: ParsedSegment[]; compressed: boolean; blocks: number; lineCount: number } {
+  const profile = detailProfile(depth);
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   if (text.length <= FULL_COVERAGE_COMPRESSION_THRESHOLD) {
     return { segments: chunkLines(text, 30), compressed: false, blocks: 0, lineCount: lines.length };
   }
 
-  const blockSize = adaptiveBlockSize(lines.length, TARGET_LOG_BLOCKS, 1_200);
+  const blockSize = adaptiveBlockSize(lines.length, profile.logBlocks, 1_200);
   const segments: ParsedSegment[] = [];
   let blockCount = 0;
 
@@ -296,12 +339,12 @@ function compressLogFullCoverage(text: string): { segments: ParsedSegment[]; com
     // contributes deterministic counts/statistics, so coverage is not lost.
     scored
       .sort((a, b) => b.score - a.score || a.index - b.index)
-      .slice(0, 3)
+      .slice(0, profile.logTopLines)
       .forEach(({ index }) => selected.add(index));
 
     const topStats = Array.from(numericStats.entries())
       .sort((a, b) => b[1].count - a[1].count)
-      .slice(0, 4);
+      .slice(0, profile.logTopStats);
     topStats.forEach(([, stat]) => {
       selected.add(stat.minIndex);
       selected.add(stat.maxIndex);
@@ -317,20 +360,21 @@ function compressLogFullCoverage(text: string): { segments: ParsedSegment[]; com
     ].join("\n");
 
     segments.push({ location: `lines ${start + 1}-${end} full-coverage digest`, text: digest, kind: "coverage_digest" });
-    segments.push(...segmentsFromSelectedLines(lines, selected, 12));
+    segments.push(...segmentsFromSelectedLines(lines, selected, profile.logContext));
     blockCount++;
   }
 
   return { segments, compressed: true, blocks: blockCount, lineCount: lines.length };
 }
 
-function compressCodeFullCoverage(text: string): { segments: ParsedSegment[]; compressed: boolean; blocks: number; lineCount: number } {
+function compressCodeFullCoverage(text: string, depth: AnalysisDepth = "fast"): { segments: ParsedSegment[]; compressed: boolean; blocks: number; lineCount: number } {
+  const profile = detailProfile(depth);
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   if (text.length <= FULL_COVERAGE_COMPRESSION_THRESHOLD) {
     return { segments: chunkLines(text, 40), compressed: false, blocks: 0, lineCount: lines.length };
   }
 
-  const blockSize = adaptiveBlockSize(lines.length, TARGET_CODE_BLOCKS, 900);
+  const blockSize = adaptiveBlockSize(lines.length, profile.codeBlocks, 900);
   const segments: ParsedSegment[] = [];
   let blockCount = 0;
 
@@ -364,8 +408,8 @@ function compressCodeFullCoverage(text: string): { segments: ParsedSegment[]; co
 
     scored
       .sort((a, b) => b.score - a.score || a.index - b.index)
-      .slice(0, 4)
-      .forEach(({ index }) => addRange(selected, index - 1, index + 1, lines.length));
+      .slice(0, profile.codeTopLines)
+      .forEach(({ index }) => addRange(selected, index - profile.codeContextRadius, index + profile.codeContextRadius, lines.length));
 
     const digest = [
       `[FULL_SCAN] code lines ${start + 1}-${end}; ${indexes.length} non-empty.`,
@@ -374,7 +418,7 @@ function compressCodeFullCoverage(text: string): { segments: ParsedSegment[]; co
     ].join("\n");
 
     segments.push({ location: `lines ${start + 1}-${end} full-coverage digest`, text: digest, kind: "coverage_digest" });
-    segments.push(...segmentsFromSelectedLines(lines, selected, 16));
+    segments.push(...segmentsFromSelectedLines(lines, selected, profile.codeContext));
     blockCount++;
   }
 
@@ -451,7 +495,9 @@ function compressCsvFullCoverage(
   data: Record<string, string>[],
   columns: string[],
   inputChars: number,
+  depth: AnalysisDepth = "fast",
 ): { segments: ParsedSegment[]; compressed: boolean; blocks: number; rowCount: number } {
+  const profile = detailProfile(depth);
   const rowCount = data.length;
   const shouldCompress = inputChars > FULL_COVERAGE_COMPRESSION_THRESHOLD || rowCount > 250;
   if (!shouldCompress) {
@@ -466,7 +512,7 @@ function compressCsvFullCoverage(
     };
   }
 
-  const blockSize = adaptiveBlockSize(rowCount, TARGET_CSV_BLOCKS, 1_200);
+  const blockSize = adaptiveBlockSize(rowCount, profile.csvBlocks, 1_200);
   const segments: ParsedSegment[] = [];
   let blockCount = 0;
   const globalStats = new Map<string, NumericStat>();
@@ -507,11 +553,11 @@ function compressCsvFullCoverage(
     }
     candidates
       .sort((a, b) => b.score - a.score || a.index - b.index)
-      .slice(0, 2)
+      .slice(0, profile.csvTopRows)
       .forEach(({ index }) => selected.add(index));
 
-    const preferred = preferredNumericColumns(columns, blockStats, 6);
-    preferred.slice(0, 2).forEach((column) => {
+    const preferred = preferredNumericColumns(columns, blockStats, profile.csvPreferredColumns);
+    preferred.slice(0, profile.csvExtremaColumns).forEach((column) => {
       const stat = blockStats.get(column);
       if (!stat) return;
       selected.add(stat.minIndex);
@@ -581,7 +627,7 @@ async function parsePdf(blob: Blob): Promise<{ segments: ParsedSegment[]; pagesR
   };
 }
 
-async function parseResearchBlob(input: NamedBlob, sourceId: string): Promise<ParsedBlobResult> {
+async function parseResearchBlob(input: NamedBlob, sourceId: string, depth: AnalysisDepth = "fast"): Promise<ParsedBlobResult> {
   const name = normalizePath(input.name);
   const ext = extensionOf(name);
   const type = ext || input.type || "unknown";
@@ -599,7 +645,7 @@ async function parseResearchBlob(input: NamedBlob, sourceId: string): Promise<Pa
 
   if (ext === "log") {
     const text = await input.blob.text();
-    const result = compressLogFullCoverage(text);
+    const result = compressLogFullCoverage(text, depth);
     return {
       source: { source_id: sourceId, name, type, segments: result.segments },
       inputChars: text.length,
@@ -610,7 +656,7 @@ async function parseResearchBlob(input: NamedBlob, sourceId: string): Promise<Pa
 
   if (CODE_EXTENSION_SET.has(ext) && ext !== "ipynb") {
     const text = await input.blob.text();
-    const result = compressCodeFullCoverage(text);
+    const result = compressCodeFullCoverage(text, depth);
     return {
       source: { source_id: sourceId, name, type, segments: result.segments },
       inputChars: text.length,
@@ -639,7 +685,7 @@ async function parseResearchBlob(input: NamedBlob, sourceId: string): Promise<Pa
       const lineCount = source.replace(/\r\n/g, "\n").split("\n").length;
       if (cellType === "code") {
         codeLines += lineCount;
-        const compressed = compressCodeFullCoverage(source);
+        const compressed = compressCodeFullCoverage(source, depth);
         compressedAny ||= compressed.compressed;
         coverageBlocks += compressed.blocks;
         compressed.segments.forEach((segment) => {
@@ -676,7 +722,7 @@ async function parseResearchBlob(input: NamedBlob, sourceId: string): Promise<Pa
     if (result.errors.length) throw new Error(`${name} CSV 파싱 오류: ${result.errors[0]?.message}`);
     const rows = result.data;
     const columns = result.meta.fields || Object.keys(rows[0] || {});
-    const compressed = compressCsvFullCoverage(rows, columns, raw.length);
+    const compressed = compressCsvFullCoverage(rows, columns, raw.length, depth);
     return {
       source: { source_id: sourceId, name, type, segments: compressed.segments },
       inputChars: raw.length,
@@ -689,7 +735,7 @@ async function parseResearchBlob(input: NamedBlob, sourceId: string): Promise<Pa
     const raw = await input.blob.text();
     const parsed = JSON.parse(raw);
     const normalized = JSON.stringify(parsed, null, 2);
-    const compact = compressLogFullCoverage(normalized);
+    const compact = compressLogFullCoverage(normalized, depth);
     return {
       source: { source_id: sourceId, name, type, segments: compact.segments },
       inputChars: raw.length,
@@ -702,7 +748,7 @@ async function parseResearchBlob(input: NamedBlob, sourceId: string): Promise<Pa
     const raw = await input.blob.text();
     const parsed = YAML.parse(raw);
     const normalized = JSON.stringify(parsed, null, 2);
-    const compact = compressLogFullCoverage(normalized);
+    const compact = compressLogFullCoverage(normalized, depth);
     return {
       source: { source_id: sourceId, name, type, segments: compact.segments },
       inputChars: raw.length,
@@ -791,7 +837,7 @@ function rawEvidenceSignalScore(segment: ParsedSegment) {
   return score;
 }
 
-function balanceSourcesForAiBudget(sources: ParsedSource[], targetChars = TARGET_AI_ANALYSIS_CHARS) {
+function balanceSourcesForAiBudget(sources: ParsedSource[], targetChars: number) {
   const originalChars = sources.reduce((sum, source) => sum + sourceCharCount(source), 0);
   if (originalChars <= targetChars) {
     return { sources, applied: false, originalChars, finalChars: originalChars };
@@ -878,7 +924,15 @@ function countRawEvidenceSegments(sources: ParsedSource[]) {
   );
 }
 
-export async function preprocessResearchFiles(files: File[], resolvePath: (file: File) => string): Promise<PreprocessResult> {
+export async function preprocessResearchFiles(
+  files: File[],
+  resolvePath: (file: File) => string,
+  options: PreprocessOptions = {},
+): Promise<PreprocessResult> {
+  const depth: AnalysisDepth = options.depth === "precise" ? "precise" : "fast";
+  const targetAnalysisChars = Math.max(180_000, Math.min(900_000, Math.round(
+    options.analysisTargetChars ?? (depth === "precise" ? PRECISE_AI_ANALYSIS_CHARS : FAST_AI_ANALYSIS_CHARS),
+  )));
   const expanded: NamedBlob[] = [];
   const warnings: string[] = [];
   let ignoredFiles = 0;
@@ -923,7 +977,7 @@ export async function preprocessResearchFiles(files: File[], resolvePath: (file:
   for (let i = 0; i < expanded.length; i++) {
     const sourceId = `SRC${String(i + 1).padStart(3, "0")}`;
     try {
-      const parsed = await parseResearchBlob(expanded[i], sourceId);
+      const parsed = await parseResearchBlob(expanded[i], sourceId, depth);
       inputTextChars += parsed.inputChars;
       if (parsed.compressed) compressedFiles++;
       warnings.push(...(parsed.warnings || []));
@@ -942,7 +996,7 @@ export async function preprocessResearchFiles(files: File[], resolvePath: (file:
     }
   }
 
-  const balanced = balanceSourcesForAiBudget(sources);
+  const balanced = balanceSourcesForAiBudget(sources, targetAnalysisChars);
   const analysisSources = balanced.sources;
   const extractedChars = balanced.finalChars;
 
@@ -970,7 +1024,7 @@ export async function preprocessResearchFiles(files: File[], resolvePath: (file:
     extractedChars,
     compressedFiles,
     analysisBudgetApplied: balanced.applied,
-    analysisBudgetChars: TARGET_AI_ANALYSIS_CHARS,
+    analysisBudgetChars: targetAnalysisChars,
     reducedFiles: compressedFiles,
     coverage,
   };

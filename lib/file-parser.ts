@@ -150,20 +150,17 @@ function chunkLines(text: string, chunkSize = 25): ParsedSegment[] {
 }
 
 async function ensurePdfNodeGlobals() {
-  const globals = globalThis as typeof globalThis & {
-    DOMMatrix?: unknown;
-    ImageData?: unknown;
-    Path2D?: unknown;
-  };
+  // DOM lib types and @napi-rs/canvas types are not structurally identical.
+  // At runtime pdfjs only needs these constructors to exist, so install the
+  // Node polyfills through an intentionally untyped global reference.
+  const globals = globalThis as any;
 
-  if (typeof globals.DOMMatrix !== "undefined") return;
+  if (globals.DOMMatrix && globals.ImageData && globals.Path2D) return;
 
-  // pdfjs-dist v5/v6 expects these browser-like globals even for text extraction
-  // when running in Node/Vercel. @napi-rs/canvas provides compatible polyfills.
   const canvas = await import("@napi-rs/canvas");
-  globals.DOMMatrix ??= canvas.DOMMatrix;
-  globals.ImageData ??= canvas.ImageData;
-  globals.Path2D ??= canvas.Path2D;
+  if (!globals.DOMMatrix) globals.DOMMatrix = canvas.DOMMatrix;
+  if (!globals.ImageData) globals.ImageData = canvas.ImageData;
+  if (!globals.Path2D) globals.Path2D = canvas.Path2D;
 }
 
 async function parsePdf(file: File): Promise<ParsedSegment[]> {

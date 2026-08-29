@@ -120,7 +120,11 @@ export async function expandUploadedFiles(uploadedFiles: File[]) {
       }
 
       const virtualName = `${uploadedFile.name} > ${entry.name}`;
-      expandedFiles.push(new File([data], virtualName, { type: "application/octet-stream" }));
+      const fileBuffer = new ArrayBuffer(data.byteLength);
+      new Uint8Array(fileBuffer).set(data);
+      expandedFiles.push(
+        new File([fileBuffer], virtualName, { type: "application/octet-stream" }),
+      );
     }
 
     if (ignoredCount > 0) {

@@ -32,7 +32,7 @@ export async function POST(request: Request) {
       model: parserModel,
       schemaName: "research_finalize",
       schema: researchFinalizeSchema as unknown as Record<string, unknown>,
-      reasoningEffort: "medium",
+      reasoningEffort: "low",
       maxOutputTokens: 14000,
       instructions: `
 당신은 Research2Report의 Research Merger다.

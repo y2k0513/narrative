@@ -41,10 +41,17 @@ const MAX_SEGMENT_CHARS = 14_000;
 // Large machine-readable files are not keyword-filtered anymore.
 // Every row/line is scanned in the browser, then represented by bounded
 // coverage digests plus raw excerpts. Human-written documents stay raw.
-const FULL_COVERAGE_COMPRESSION_THRESHOLD = 28_000;
-const TARGET_LOG_BLOCKS = 80;
-const TARGET_CODE_BLOCKS = 70;
-const TARGET_CSV_BLOCKS = 60;
+const FULL_COVERAGE_COMPRESSION_THRESHOLD = 22_000;
+// Full coverage means every row/line is scanned in the browser, not that every
+// raw character is sent to the model. These targets keep a compact digest +
+// representative raw evidence from every region of large machine-readable files.
+const TARGET_LOG_BLOCKS = 28;
+const TARGET_CODE_BLOCKS = 30;
+const TARGET_CSV_BLOCKS = 24;
+// Global guardrail after per-file full-coverage compression. Coverage digests from
+// every region are preserved; only redundant machine-readable RAW_EVIDENCE
+// excerpts are balanced if the project is still too large.
+const TARGET_AI_ANALYSIS_CHARS = 360_000;
 
 export type PreprocessResult = {
   sources: ParsedSource[];
@@ -54,6 +61,8 @@ export type PreprocessResult = {
   inputTextChars: number;
   extractedChars: number;
   compressedFiles: number;
+  analysisBudgetApplied: boolean;
+  analysisBudgetChars: number;
   // Kept as an alias so older UI code/patches do not break.
   reducedFiles: number;
   coverage: ResearchCoverage;
@@ -198,6 +207,13 @@ function addRepresentativeIndexes(target: Set<number>, indexes: number[], total:
   addRange(target, last - 1, last, total);
 }
 
+function addSingleRepresentativeIndexes(target: Set<number>, indexes: number[]) {
+  if (!indexes.length) return;
+  target.add(indexes[0]);
+  target.add(indexes[Math.floor(indexes.length / 2)]);
+  target.add(indexes[indexes.length - 1]);
+}
+
 function lineSignalScore(line: string, mode: "log" | "code") {
   let score = 0;
   const strongMetric = /\b(f1|macro[-_ ]?f1|micro[-_ ]?f1|accuracy|precision|recall|auc|auroc|map|mAP|bleu|rouge|wer|cer|rmse|mae|mse)\b/i;
@@ -228,7 +244,7 @@ function compressLogFullCoverage(text: string): { segments: ParsedSegment[]; com
     return { segments: chunkLines(text, 30), compressed: false, blocks: 0, lineCount: lines.length };
   }
 
-  const blockSize = adaptiveBlockSize(lines.length, TARGET_LOG_BLOCKS, 600);
+  const blockSize = adaptiveBlockSize(lines.length, TARGET_LOG_BLOCKS, 1_200);
   const segments: ParsedSegment[] = [];
   let blockCount = 0;
 
@@ -236,7 +252,7 @@ function compressLogFullCoverage(text: string): { segments: ParsedSegment[]; com
     const end = Math.min(lines.length, start + blockSize);
     const selected = new Set<number>();
     const indexes = nonEmptyIndexes(lines, start, end);
-    addRepresentativeIndexes(selected, indexes, lines.length);
+    addSingleRepresentativeIndexes(selected, indexes);
 
     const scored: Array<{ index: number; score: number }> = [];
     const counts = { metric: 0, result: 0, issue: 0, config: 0, routine: 0, numeric: 0 };
@@ -276,31 +292,32 @@ function compressLogFullCoverage(text: string): { segments: ParsedSegment[]; com
       }
     }
 
+    // Keep only a small number of exact lines per region. The full block still
+    // contributes deterministic counts/statistics, so coverage is not lost.
     scored
       .sort((a, b) => b.score - a.score || a.index - b.index)
-      .slice(0, 5)
-      .forEach(({ index }) => addRange(selected, index - 1, index + 1, lines.length));
+      .slice(0, 3)
+      .forEach(({ index }) => selected.add(index));
 
     const topStats = Array.from(numericStats.entries())
       .sort((a, b) => b[1].count - a[1].count)
-      .slice(0, 6);
+      .slice(0, 4);
     topStats.forEach(([, stat]) => {
-      addRange(selected, stat.minIndex - 1, stat.minIndex + 1, lines.length);
-      addRange(selected, stat.maxIndex - 1, stat.maxIndex + 1, lines.length);
+      selected.add(stat.minIndex);
+      selected.add(stat.maxIndex);
     });
     const numericSummary = topStats
-      .map(([key, stat]) => `${key}: n=${stat.count}, min=${formatNumber(stat.min)} (L${stat.minIndex + 1}), max=${formatNumber(stat.max)} (L${stat.maxIndex + 1}), mean=${formatNumber(stat.sum / stat.count)}`)
-      .join("\n");
+      .map(([key, stat]) => `${key}: n=${stat.count}, min=${formatNumber(stat.min)}@L${stat.minIndex + 1}, max=${formatNumber(stat.max)}@L${stat.maxIndex + 1}, mean=${formatNumber(stat.sum / stat.count)}`)
+      .join("; ");
 
     const digest = [
-      `Full Coverage block: lines ${start + 1}-${end} (${end - start} lines; ${indexes.length} non-empty).`,
-      `Browser scan counts: metric=${counts.metric}, result=${counts.result}, issue=${counts.issue}, config=${counts.config}, training/step=${counts.routine}, numeric key-values=${counts.numeric}.`,
-      numericSummary ? `Numeric key statistics:\n${numericSummary}` : "Numeric key statistics: none detected.",
-      "Every line in this block was scanned deterministically. This digest is context only; RAW_EVIDENCE excerpts carry citable source text.",
+      `[FULL_SCAN] lines ${start + 1}-${end}; ${indexes.length} non-empty.`,
+      `signals metric=${counts.metric}, result=${counts.result}, issue=${counts.issue}, config=${counts.config}, train/step=${counts.routine}, numeric=${counts.numeric}.`,
+      numericSummary ? `stats ${numericSummary}` : "stats none detected.",
     ].join("\n");
 
     segments.push({ location: `lines ${start + 1}-${end} full-coverage digest`, text: digest, kind: "coverage_digest" });
-    segments.push(...segmentsFromSelectedLines(lines, selected));
+    segments.push(...segmentsFromSelectedLines(lines, selected, 12));
     blockCount++;
   }
 
@@ -313,7 +330,7 @@ function compressCodeFullCoverage(text: string): { segments: ParsedSegment[]; co
     return { segments: chunkLines(text, 40), compressed: false, blocks: 0, lineCount: lines.length };
   }
 
-  const blockSize = adaptiveBlockSize(lines.length, TARGET_CODE_BLOCKS, 420);
+  const blockSize = adaptiveBlockSize(lines.length, TARGET_CODE_BLOCKS, 900);
   const segments: ParsedSegment[] = [];
   let blockCount = 0;
 
@@ -321,13 +338,7 @@ function compressCodeFullCoverage(text: string): { segments: ParsedSegment[]; co
     const end = Math.min(lines.length, start + blockSize);
     const selected = new Set<number>();
     const indexes = nonEmptyIndexes(lines, start, end);
-    addRepresentativeIndexes(selected, indexes, lines.length);
-
-    // Keep a small central raw window from every block even when it has no obvious keyword.
-    if (indexes.length) {
-      const center = indexes[Math.floor(indexes.length / 2)];
-      addRange(selected, center - 3, center + 3, lines.length);
-    }
+    addSingleRepresentativeIndexes(selected, indexes);
 
     const scored: Array<{ index: number; score: number }> = [];
     const definitions: string[] = [];
@@ -341,7 +352,7 @@ function compressCodeFullCoverage(text: string): { segments: ParsedSegment[]; co
 
       if (/^\s*(?:export\s+)?(?:async\s+)?(?:def|class|function|interface|type|enum|struct|fn|func)\b/i.test(line)) {
         counts.definitions++;
-        if (definitions.length < 10) definitions.push(`L${index + 1}: ${line.trim().slice(0, 160)}`);
+        if (definitions.length < 6) definitions.push(`L${index + 1}: ${line.trim().slice(0, 120)}`);
       }
       if (/^\s*(?:import|from|require\(|#include|using\s|package\s)/i.test(line)) counts.imports++;
       if (/\b(if|else|elif|switch|case|match|when)\b/.test(line)) counts.branches++;
@@ -353,18 +364,17 @@ function compressCodeFullCoverage(text: string): { segments: ParsedSegment[]; co
 
     scored
       .sort((a, b) => b.score - a.score || a.index - b.index)
-      .slice(0, 8)
-      .forEach(({ index }) => addRange(selected, index - 2, index + 3, lines.length));
+      .slice(0, 4)
+      .forEach(({ index }) => addRange(selected, index - 1, index + 1, lines.length));
 
     const digest = [
-      `Full Coverage code block: lines ${start + 1}-${end} (${end - start} lines; ${indexes.length} non-empty).`,
-      `Structure counts: definitions=${counts.definitions}, imports=${counts.imports}, branches=${counts.branches}, loops=${counts.loops}, returns=${counts.returns}, research-config=${counts.config}, train/eval/inference=${counts.execution}.`,
-      definitions.length ? `Definitions observed:\n${definitions.join("\n")}` : "Definitions observed: none in this block.",
-      "Every line in this block was scanned deterministically. This digest is context only; RAW_EVIDENCE excerpts carry citable source text.",
+      `[FULL_SCAN] code lines ${start + 1}-${end}; ${indexes.length} non-empty.`,
+      `structure def=${counts.definitions}, import=${counts.imports}, branch=${counts.branches}, loop=${counts.loops}, return=${counts.returns}, research-config=${counts.config}, train/eval/infer=${counts.execution}.`,
+      definitions.length ? `defs ${definitions.join(" | ")}` : "defs none in this block.",
     ].join("\n");
 
     segments.push({ location: `lines ${start + 1}-${end} full-coverage digest`, text: digest, kind: "coverage_digest" });
-    segments.push(...segmentsFromSelectedLines(lines, selected));
+    segments.push(...segmentsFromSelectedLines(lines, selected, 16));
     blockCount++;
   }
 
@@ -456,25 +466,24 @@ function compressCsvFullCoverage(
     };
   }
 
-  const blockSize = adaptiveBlockSize(rowCount, TARGET_CSV_BLOCKS, 500);
+  const blockSize = adaptiveBlockSize(rowCount, TARGET_CSV_BLOCKS, 1_200);
   const segments: ParsedSegment[] = [];
   let blockCount = 0;
   const globalStats = new Map<string, NumericStat>();
 
-  // This first pass touches every row and every value for global numeric coverage.
+  // Full pass: every row/value participates in deterministic statistics.
   data.forEach((row, index) => updateNumericStats(globalStats, row, index));
-  const preferredGlobal = preferredNumericColumns(columns, globalStats, 14);
+  const preferredGlobal = preferredNumericColumns(columns, globalStats, 10);
   const globalSummary = preferredGlobal.map((column) => {
     const stat = globalStats.get(column)!;
-    return `${column}: n=${stat.count}, min=${formatNumber(stat.min)} (row ${stat.minIndex + 2}), max=${formatNumber(stat.max)} (row ${stat.maxIndex + 2}), mean=${formatNumber(stat.sum / stat.count)}`;
+    return `${column}: n=${stat.count}, min=${formatNumber(stat.min)}@row${stat.minIndex + 2}, max=${formatNumber(stat.max)}@row${stat.maxIndex + 2}, mean=${formatNumber(stat.sum / stat.count)}`;
   });
   segments.push({
     location: "CSV full-coverage summary",
     kind: "coverage_digest",
     text: [
-      `CSV rows fully scanned: ${rowCount}. Columns (${columns.length}): ${columns.slice(0, 80).join(", ")}${columns.length > 80 ? ", …" : ""}.`,
-      globalSummary.length ? `Global numeric statistics:\n${globalSummary.join("\n")}` : "No numeric columns detected.",
-      "All rows were scanned in the browser. Statistics are deterministic context; citable values are also retained as RAW_EVIDENCE rows where possible.",
+      `[FULL_SCAN] CSV rows=${rowCount}; columns(${columns.length})=${columns.slice(0, 60).join(", ")}${columns.length > 60 ? ", …" : ""}.`,
+      globalSummary.length ? `global stats ${globalSummary.join("; ")}` : "global stats none detected.",
     ].join("\n"),
   });
 
@@ -498,11 +507,11 @@ function compressCsvFullCoverage(
     }
     candidates
       .sort((a, b) => b.score - a.score || a.index - b.index)
-      .slice(0, 4)
+      .slice(0, 2)
       .forEach(({ index }) => selected.add(index));
 
-    const preferred = preferredNumericColumns(columns, blockStats, 10);
-    preferred.slice(0, 4).forEach((column) => {
+    const preferred = preferredNumericColumns(columns, blockStats, 6);
+    preferred.slice(0, 2).forEach((column) => {
       const stat = blockStats.get(column);
       if (!stat) return;
       selected.add(stat.minIndex);
@@ -511,16 +520,15 @@ function compressCsvFullCoverage(
 
     const statLines = preferred.map((column) => {
       const stat = blockStats.get(column)!;
-      return `${column}: n=${stat.count}, min=${formatNumber(stat.min)} (row ${stat.minIndex + 2}), max=${formatNumber(stat.max)} (row ${stat.maxIndex + 2}), mean=${formatNumber(stat.sum / stat.count)}`;
+      return `${column}: n=${stat.count}, min=${formatNumber(stat.min)}@row${stat.minIndex + 2}, max=${formatNumber(stat.max)}@row${stat.maxIndex + 2}, mean=${formatNumber(stat.sum / stat.count)}`;
     });
     segments.push({
       location: `rows ${start + 2}-${end + 1} full-coverage digest`,
       kind: "coverage_digest",
       text: [
-        `Full Coverage CSV block: data rows ${start + 1}-${end} (${end - start} rows).`,
-        statLines.length ? `Numeric statistics:\n${statLines.join("\n")}` : "Numeric statistics: none detected in this block.",
-        `Representative/high-signal raw rows retained: ${Array.from(selected).sort((a, b) => a - b).map((index) => index + 2).join(", ")}.`,
-        "Every row in this block was scanned deterministically. This digest is context only; RAW_EVIDENCE rows carry citable source text.",
+        `[FULL_SCAN] CSV data rows ${start + 1}-${end} (${end - start}).`,
+        statLines.length ? `stats ${statLines.join("; ")}` : "stats none detected.",
+        `raw rows kept ${Array.from(selected).sort((a, b) => a - b).map((index) => index + 2).join(", ")}.`,
       ].join("\n"),
     });
 
@@ -762,6 +770,107 @@ async function expandZip(file: File): Promise<{ entries: NamedBlob[]; warnings: 
   return { entries, warnings, ignored };
 }
 
+function sourceCharCount(source: ParsedSource) {
+  return source.segments.reduce((sum, segment) => sum + segment.text.length, 0);
+}
+
+function isMachineReadableSource(source: ParsedSource) {
+  const type = source.type.toLowerCase();
+  return type === "log" || type === "csv" || type === "json" || type === "yaml" || type === "yml" || type === "ipynb" || CODE_EXTENSION_SET.has(type);
+}
+
+function rawEvidenceSignalScore(segment: ParsedSegment) {
+  const text = segment.text;
+  let score = 0;
+  if (/\b(f1|accuracy|precision|recall|auc|auroc|rmse|mae|mse|score|metric)\b/i.test(text)) score += 12;
+  if (/\b(test|validation|valid|val|eval|best|final|result|baseline|ablation|summary)\b/i.test(text)) score += 10;
+  if (/\b(error|warning|exception|traceback|failed|failure|nan|inf)\b/i.test(text)) score += 9;
+  if (/\b(seed|learning.?rate|\blr\b|batch.?size|threshold|optimizer|scheduler|dropout|weight.?decay|window|hop|sample.?rate|criterion)\b/i.test(text)) score += 7;
+  if (/^\s*(?:export\s+)?(?:async\s+)?(?:def|class|function|interface|type|enum|struct|fn|func)\b/im.test(text)) score += 8;
+  score += Math.min(6, (text.match(/-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/gi) || []).length);
+  return score;
+}
+
+function balanceSourcesForAiBudget(sources: ParsedSource[], targetChars = TARGET_AI_ANALYSIS_CHARS) {
+  const originalChars = sources.reduce((sum, source) => sum + sourceCharCount(source), 0);
+  if (originalChars <= targetChars) {
+    return { sources, applied: false, originalChars, finalChars: originalChars };
+  }
+
+  // Human-authored prose/PDF text and every deterministic coverage digest are
+  // mandatory. Only machine-readable raw excerpts are candidates for balancing.
+  const mandatoryChars = sources.reduce((sum, source) => {
+    if (!isMachineReadableSource(source)) return sum + sourceCharCount(source);
+    return sum + source.segments
+      .filter((segment) => (segment.kind || "raw") === "coverage_digest")
+      .reduce((inner, segment) => inner + segment.text.length, 0);
+  }, 0);
+
+  if (mandatoryChars >= targetChars) {
+    // Do not truncate human-written documents or coverage digests merely to hit a
+    // numeric target. The adaptive batcher will use more than three calls here.
+    return { sources, applied: false, originalChars, finalChars: originalChars };
+  }
+
+  const rawBudget = targetChars - mandatoryChars;
+  const machineSources = sources.filter(isMachineReadableSource);
+  const totalMachineRawChars = machineSources.reduce(
+    (sum, source) => sum + source.segments
+      .filter((segment) => (segment.kind || "raw") === "raw")
+      .reduce((inner, segment) => inner + segment.text.length, 0),
+    0,
+  );
+
+  const balanced = sources.map((source) => {
+    if (!isMachineReadableSource(source)) return source;
+    const digests = source.segments.filter((segment) => (segment.kind || "raw") === "coverage_digest");
+    const raws = source.segments.filter((segment) => (segment.kind || "raw") === "raw");
+    if (!raws.length) return source;
+
+    const sourceRawChars = raws.reduce((sum, segment) => sum + segment.text.length, 0);
+    const proportionalBudget = totalMachineRawChars > 0
+      ? Math.floor(rawBudget * (sourceRawChars / totalMachineRawChars))
+      : 0;
+    const fairMinimum = Math.min(2_500, Math.floor(rawBudget / Math.max(1, machineSources.length)));
+    const sourceBudget = Math.max(fairMinimum, proportionalBudget);
+
+    const keep = new Set<number>();
+    keep.add(0);
+    keep.add(Math.floor(raws.length / 2));
+    keep.add(raws.length - 1);
+
+    // Preserve evenly distributed raw anchors across the file before filling the
+    // remaining budget with high-signal exact excerpts.
+    const anchorCount = Math.min(12, raws.length);
+    for (let i = 0; i < anchorCount; i++) {
+      keep.add(Math.floor((i * (raws.length - 1)) / Math.max(1, anchorCount - 1)));
+    }
+
+    const ranked = raws
+      .map((segment, index) => ({ index, score: rawEvidenceSignalScore(segment), chars: segment.text.length }))
+      .sort((a, b) => b.score - a.score || a.index - b.index);
+
+    let keptChars = Array.from(keep).reduce((sum, index) => sum + (raws[index]?.text.length || 0), 0);
+    for (const candidate of ranked) {
+      if (keep.has(candidate.index)) continue;
+      if (keptChars + candidate.chars > sourceBudget && keptChars >= sourceBudget) continue;
+      keep.add(candidate.index);
+      keptChars += candidate.chars;
+      if (keptChars >= sourceBudget) break;
+    }
+
+    const keptRawSegments = raws.filter((_, index) => keep.has(index));
+    const keptRawSet = new Set(keptRawSegments);
+    const segments = source.segments.filter((segment) =>
+      (segment.kind || "raw") === "coverage_digest" || keptRawSet.has(segment),
+    );
+    return { ...source, segments };
+  });
+
+  const finalChars = balanced.reduce((sum, source) => sum + sourceCharCount(source), 0);
+  return { sources: balanced, applied: finalChars < originalChars, originalChars, finalChars };
+}
+
 function countRawEvidenceSegments(sources: ParsedSource[]) {
   return sources.reduce(
     (sum, source) => sum + source.segments.filter((segment) => (segment.kind || "raw") === "raw").length,
@@ -833,14 +942,19 @@ export async function preprocessResearchFiles(files: File[], resolvePath: (file:
     }
   }
 
-  const extractedChars = sources.reduce(
-    (sum, source) => sum + source.segments.reduce((inner, segment) => inner + segment.text.length, 0),
-    0,
-  );
+  const balanced = balanceSourcesForAiBudget(sources);
+  const analysisSources = balanced.sources;
+  const extractedChars = balanced.finalChars;
 
-  coverage.parsed_sources = sources.length;
+  if (balanced.applied) {
+    warnings.push(
+      `AI 입력 안정화를 위해 Full Coverage Digest는 전부 유지하고 대형 기계형 자료의 중복 RAW_EVIDENCE excerpt만 균형 압축했습니다 (${balanced.originalChars.toLocaleString()} → ${balanced.finalChars.toLocaleString()} chars).`,
+    );
+  }
+
+  coverage.parsed_sources = analysisSources.length;
   coverage.ignored_files = ignoredFiles;
-  coverage.raw_evidence_segments = countRawEvidenceSegments(sources);
+  coverage.raw_evidence_segments = countRawEvidenceSegments(analysisSources);
   coverage.input_chars = inputTextChars;
   coverage.analysis_chars = extractedChars;
   coverage.compression_percent = inputTextChars > 0
@@ -848,13 +962,15 @@ export async function preprocessResearchFiles(files: File[], resolvePath: (file:
     : 0;
 
   return {
-    sources,
+    sources: analysisSources,
     warnings,
     ignoredFiles,
     expandedFiles: expanded.length,
     inputTextChars,
     extractedChars,
     compressedFiles,
+    analysisBudgetApplied: balanced.applied,
+    analysisBudgetChars: TARGET_AI_ANALYSIS_CHARS,
     reducedFiles: compressedFiles,
     coverage,
   };

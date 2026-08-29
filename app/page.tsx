@@ -37,7 +37,9 @@ const MAX_FOLDER_FILE_SIZE = 40 * 1024 * 1024;
 const MAX_MANUAL_ZIP_SIZE = 80 * 1024 * 1024;
 const MAX_ANALYSIS_BATCHES = 100;
 const FINALIZE_GROUP_SIZE = 12;
-const ANALYSIS_BATCH_CHARS = 100_000;
+const TARGET_ANALYSIS_BATCHES = 3;
+const MIN_ANALYSIS_BATCH_CHARS = 110_000;
+const MAX_ANALYSIS_BATCH_CHARS = 150_000;
 const MAX_RATE_LIMIT_RETRIES = 6;
 const ANALYSIS_CONCURRENCY = 2;
 
@@ -207,7 +209,17 @@ export default function HomePage() {
         throw new Error("분석 가능한 텍스트를 찾지 못했습니다.");
       }
 
-      const batches = buildAnalysisBatches(preprocessed.sources, ANALYSIS_BATCH_CHARS);
+      // Keep the model-call count close to the original MVP speed while preserving
+      // browser-side full coverage. The batch size adapts so a typical large project
+      // lands around 2-3 Luna calls instead of dozens of small calls.
+      const adaptiveBatchChars = Math.min(
+        MAX_ANALYSIS_BATCH_CHARS,
+        Math.max(
+          MIN_ANALYSIS_BATCH_CHARS,
+          Math.ceil(preprocessed.extractedChars / TARGET_ANALYSIS_BATCHES / 5_000) * 5_000,
+        ),
+      );
+      const batches = buildAnalysisBatches(preprocessed.sources, adaptiveBatchChars);
       if (!batches.length) throw new Error("분석할 텍스트 배치를 만들지 못했습니다.");
       if (batches.length > MAX_ANALYSIS_BATCHES) {
         throw new Error(
@@ -217,7 +229,7 @@ export default function HomePage() {
 
       const compressionPercent = preprocessed.coverage.compression_percent;
       const compressionLabel = preprocessed.compressedFiles
-        ? `Full Coverage Compression ${preprocessed.compressedFiles} files · ${compressionPercent}% 축소`
+        ? `Full Coverage Compression ${preprocessed.compressedFiles} files · ${compressionPercent}% 축소${preprocessed.analysisBudgetApplied ? ` · AI context ${Math.round(preprocessed.extractedChars / 1000)}k` : ""}`
         : "원문 전체 전달";
       const coverageUnits =
         preprocessed.coverage.text_lines_scanned +
@@ -228,7 +240,7 @@ export default function HomePage() {
         preprocessed.coverage.notebook_cells_scanned;
 
       setAnalysisProgress(
-        `Full Coverage Scan 완료 · ${coverageUnits.toLocaleString()} units scanned · ${compressionLabel} · ${batches.length}개 AI 배치 · ${ANALYSIS_CONCURRENCY}개 병렬 분석`,
+        `Full Coverage Scan 완료 · ${coverageUnits.toLocaleString()} units scanned · ${compressionLabel} · ${batches.length}개 AI 배치 (${Math.round(adaptiveBatchChars / 1000)}k chars/batch) · ${ANALYSIS_CONCURRENCY}개 병렬 분석`,
       );
 
       const partials = new Array<ResearchChunkAnalysis>(batches.length);

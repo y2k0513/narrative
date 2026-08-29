@@ -37,6 +37,7 @@ const MAX_FOLDER_FILE_SIZE = 40 * 1024 * 1024;
 const MAX_MANUAL_ZIP_SIZE = 80 * 1024 * 1024;
 const MAX_ANALYSIS_BATCHES = 100;
 const FINALIZE_GROUP_SIZE = 12;
+const ANALYSIS_CONCURRENCY = 4;
 
 function displayPath(file: File) {
   const relativePath = (file as BrowserFile).webkitRelativePath;
@@ -155,7 +156,7 @@ export default function HomePage() {
     if (!files.length) return;
     setBusy("analyze");
     setError("");
-    setAnalysisProgress("브라우저에서 연구자료를 텍스트로 변환하는 중...");
+    setAnalysisProgress("브라우저 Full Coverage Scan 시작 · 모든 지원 파일을 전수 스캔하는 중...");
     setAnalysis(null);
     setReport(null);
     setGroundedReport(null);
@@ -176,27 +177,48 @@ export default function HomePage() {
         );
       }
 
-      if (batches.length > 30) {
-        setAnalysisProgress(
-          `대형 프로젝트 감지 · ${batches.length}개 AI 배치 · 분석 시간이 길어지고 API 사용량이 증가할 수 있습니다.`,
-        );
-      }
+      const compressionPercent = preprocessed.coverage.compression_percent;
+      const compressionLabel = preprocessed.compressedFiles
+        ? `Full Coverage Compression ${preprocessed.compressedFiles} files · ${compressionPercent}% 축소`
+        : "원문 전체 전달";
+      const coverageUnits =
+        preprocessed.coverage.text_lines_scanned +
+        preprocessed.coverage.log_lines_scanned +
+        preprocessed.coverage.code_lines_scanned +
+        preprocessed.coverage.csv_rows_scanned +
+        preprocessed.coverage.pdf_pages_scanned +
+        preprocessed.coverage.notebook_cells_scanned;
 
-      const partials: ResearchChunkAnalysis[] = [];
-      for (let i = 0; i < batches.length; i++) {
-        const batch = batches[i];
-        setAnalysisProgress(
-          `브라우저 전처리 완료 · ${(preprocessed.extractedChars / 1_000_000).toFixed(2)}M chars · AI 배치 분석 ${i + 1}/${batches.length}`,
-        );
-        const response = await fetch("/api/analyze/chunk", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ batchId: batch.batch_id, text: batch.text }),
-        });
-        partials.push((await readJsonOrThrow(response)) as ResearchChunkAnalysis);
-      }
+      setAnalysisProgress(
+        `Full Coverage Scan 완료 · ${coverageUnits.toLocaleString()} units scanned · ${compressionLabel} · ${batches.length}개 AI 배치 · ${ANALYSIS_CONCURRENCY}개 병렬 분석`,
+      );
 
-      setAnalysisProgress(`배치 ${batches.length}개 분석 완료 · Research Overview 통합 중...`);
+      const partials = new Array<ResearchChunkAnalysis>(batches.length);
+      let nextBatchIndex = 0;
+      let completedBatches = 0;
+
+      const analyzeWorker = async () => {
+        while (true) {
+          const index = nextBatchIndex++;
+          if (index >= batches.length) return;
+          const batch = batches[index];
+          const response = await fetch("/api/analyze/chunk", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ batchId: batch.batch_id, text: batch.text }),
+          });
+          partials[index] = (await readJsonOrThrow(response)) as ResearchChunkAnalysis;
+          completedBatches++;
+          setAnalysisProgress(
+            `Full Coverage Scan 완료 · ${compressionLabel} · ${(preprocessed.extractedChars / 1_000_000).toFixed(2)}M analysis chars · AI 배치 ${completedBatches}/${batches.length} 완료 (${ANALYSIS_CONCURRENCY}개 병렬)`,
+          );
+        }
+      };
+
+      const workerCount = Math.min(ANALYSIS_CONCURRENCY, batches.length);
+      await Promise.all(Array.from({ length: workerCount }, () => analyzeWorker()));
+
+      setAnalysisProgress(`배치 ${batches.length}개 병렬 분석 완료 · Research Overview 통합 중...`);
 
       const digest = partials.map((partial, index) => ({
         batch_id: batches[index]?.batch_id || `B${index + 1}`,
@@ -307,17 +329,21 @@ export default function HomePage() {
           type: source.type,
           segment_count: source.segments.length,
         })),
+        coverage: { ...preprocessed.coverage, ai_batches: batches.length },
         warnings: Array.from(new Set([
           ...finalized.warnings,
           ...preprocessed.warnings,
           ...partials.flatMap((partial) => partial.warnings),
+          ...(preprocessed.compressedFiles
+            ? [`대형 로그/CSV/코드 ${preprocessed.compressedFiles}개는 일부만 키워드 선별한 것이 아니라 모든 line/row를 브라우저에서 전수 스캔한 뒤 Coverage Digest + 원문 Evidence로 계층 압축했습니다.`]
+            : []),
           ...(preprocessed.ignoredFiles ? [`지원하지 않거나 제외 대상인 파일 ${preprocessed.ignoredFiles}개는 분석하지 않았습니다.`] : []),
         ])),
       };
 
       setAnalysis(analysisResult);
       setAnalysisProgress(
-        `완료 · ${preprocessed.sources.length} files · ${batches.length} AI batches · ${evidence.length} evidence`,
+        `완료 · ${preprocessed.sources.length} files full-scanned · ${compressionLabel} · ${batches.length} AI batches · ${evidence.length} evidence`,
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : "분석 오류");
@@ -531,6 +557,30 @@ export default function HomePage() {
               <Metric label="Evidence" value={analysis.evidence.length} />
               <Metric label="Concepts" value={analysis.concepts.length} />
             </div>
+
+            {analysis.coverage && (
+              <div className="subpanel">
+                <h3>Full Coverage Scan</h3>
+                <p className="muted">
+                  대형 LOG·CSV·코드는 일부 키워드만 고르는 대신 모든 line/row를 브라우저에서 전수 스캔하고,
+                  블록별 Coverage Digest와 원문 Evidence를 만든 뒤 AI에 전달합니다.
+                </p>
+                <div className="coverage-grid">
+                  <Metric label="Sources Scanned" value={`${analysis.coverage.parsed_sources}/${analysis.coverage.expanded_files}`} />
+                  <Metric label="LOG Lines" value={analysis.coverage.log_lines_scanned.toLocaleString()} />
+                  <Metric label="Code Lines" value={analysis.coverage.code_lines_scanned.toLocaleString()} />
+                  <Metric label="CSV Rows" value={analysis.coverage.csv_rows_scanned.toLocaleString()} />
+                  <Metric label="Text Lines" value={analysis.coverage.text_lines_scanned.toLocaleString()} />
+                  <Metric label="PDF Pages" value={analysis.coverage.pdf_pages_scanned.toLocaleString()} />
+                  <Metric label="Coverage Blocks" value={analysis.coverage.coverage_blocks.toLocaleString()} />
+                  <Metric label="Compression" value={`${analysis.coverage.compression_percent}%`} />
+                  <Metric label="AI Batches" value={analysis.coverage.ai_batches} />
+                </div>
+                <small className="muted">
+                  Coverage Digest는 전체 구간의 구조·통계를 전달하는 문맥이며, Claim 근거는 RAW_EVIDENCE 원문 위치를 우선 사용합니다.
+                </small>
+              </div>
+            )}
 
             <div className="overview-grid">
               <div className="subpanel">
@@ -802,13 +852,13 @@ export default function HomePage() {
       )}
 
       <footer>
-        기본 흐름: 연구자료는 브라우저에서 먼저 텍스트로 변환해 작은 배치로 분석합니다. 기존 보고서가 있으면 원문을 Evidence와 연결하고, 없을 때만 새 초안을 생성합니다.
+        기본 흐름: 연구자료 전체를 브라우저에서 Full Coverage Scan → 계층 압축 → 병렬 AI 해석합니다. 기존 보고서가 있으면 원문을 Evidence와 연결하고, 없을 때만 새 초안을 생성합니다.
       </footer>
     </main>
   );
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function Metric({ label, value }: { label: string; value: number | string }) {
   return <div className="metric"><span>{label}</span><strong>{value}</strong></div>;
 }
 

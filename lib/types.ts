@@ -23,6 +23,25 @@ export type ResearchConcept = {
   aliases: string[];
 };
 
+export type ResearchCoverage = {
+  selected_files: number;
+  expanded_files: number;
+  parsed_sources: number;
+  ignored_files: number;
+  text_lines_scanned: number;
+  log_lines_scanned: number;
+  code_lines_scanned: number;
+  csv_rows_scanned: number;
+  pdf_pages_scanned: number;
+  notebook_cells_scanned: number;
+  coverage_blocks: number;
+  raw_evidence_segments: number;
+  input_chars: number;
+  analysis_chars: number;
+  compression_percent: number;
+  ai_batches: number;
+};
+
 export type ResearchAnalysis = {
   research_topic: string;
   research_topic_en: string;
@@ -61,6 +80,7 @@ export type ResearchAnalysis = {
     segment_count: number;
   }>;
   warnings: string[];
+  coverage?: ResearchCoverage;
 };
 
 export type ReportClaim = {
@@ -127,6 +147,7 @@ export type PaperResult = {
 export type ParsedSegment = {
   location: string;
   text: string;
+  kind?: "raw" | "coverage_digest";
 };
 
 export type ParsedSource = {

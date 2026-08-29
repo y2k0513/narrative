@@ -1,0 +1,17 @@
+Research2Report Full Coverage patch
+
+1) Extract this ZIP directly into your existing project root and overwrite files.
+2) Keep your existing .env.local.
+3) Run:
+   Remove-Item -Recurse -Force .next -ErrorAction SilentlyContinue
+   npm run build
+4) If successful:
+   git add .
+   git commit -m "Use full coverage hierarchical analysis"
+   git push
+
+Changed runtime files:
+- app/page.tsx
+- app/api/analyze/chunk/route.ts
+- lib/client-file-parser.ts
+- lib/types.ts

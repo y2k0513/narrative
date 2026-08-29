@@ -1,9 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  allowedDevOrigins: ["58.145.57.186"],
-
-  serverExternalPackages: ["pdfjs-dist"],
+  // Keep pdfjs-dist as a real Node dependency on server routes.
+  // This prevents Next/Turbopack from relocating pdf.mjs without its worker.
+  serverExternalPackages: ["pdfjs-dist", "@napi-rs/canvas"],
 };
 
 export default nextConfig;

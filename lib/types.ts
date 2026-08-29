@@ -123,3 +123,42 @@ export type PaperResult = {
   }>;
   final_score: number;
 };
+
+export type ParsedSegment = {
+  location: string;
+  text: string;
+};
+
+export type ParsedSource = {
+  source_id: string;
+  name: string;
+  type: string;
+  segments: ParsedSegment[];
+};
+
+export type ResearchChunkAnalysis = {
+  chunk_summary: string;
+  methods: ResearchAnalysis["methods"];
+  experiments: ResearchAnalysis["experiments"];
+  evidence: Array<{
+    temp_id: string;
+    type: Evidence["type"];
+    content: string;
+    experiment_id: string | null;
+    source_id: string;
+    source_location: string;
+    raw_quote: string;
+  }>;
+  findings: Array<{
+    text: string;
+    kind: "observed" | "inferred";
+    evidence_temp_ids: string[];
+  }>;
+  concepts: ResearchConcept[];
+  warnings: string[];
+};
+
+export type ResearchFinalizeResult = Pick<
+  ResearchAnalysis,
+  "research_topic" | "research_topic_en" | "objective" | "summary" | "methods" | "experiments" | "concepts" | "warnings"
+>;

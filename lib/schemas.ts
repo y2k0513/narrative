@@ -253,3 +253,34 @@ export const reportGroundingSchema = {
   },
   required: ["title", "annotations", "warnings"]
 } as const;
+
+export const researchChunkSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    chunk_summary: { type: "string" },
+    methods: researchAnalysisSchema.properties.methods,
+    experiments: researchAnalysisSchema.properties.experiments,
+    evidence: researchAnalysisSchema.properties.evidence,
+    findings: researchAnalysisSchema.properties.findings,
+    concepts: researchAnalysisSchema.properties.concepts,
+    warnings: { type: "array", items: { type: "string" } },
+  },
+  required: ["chunk_summary", "methods", "experiments", "evidence", "findings", "concepts", "warnings"],
+} as const;
+
+export const researchFinalizeSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    research_topic: { type: "string" },
+    research_topic_en: { type: "string" },
+    objective: { type: "string" },
+    summary: { type: "string" },
+    methods: researchAnalysisSchema.properties.methods,
+    experiments: researchAnalysisSchema.properties.experiments,
+    concepts: researchAnalysisSchema.properties.concepts,
+    warnings: { type: "array", items: { type: "string" } },
+  },
+  required: ["research_topic", "research_topic_en", "objective", "summary", "methods", "experiments", "concepts", "warnings"],
+} as const;

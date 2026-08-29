@@ -16,8 +16,7 @@
     "react-dom": "latest",
     "yaml": "^2.8.1",
     "jszip": "^3.10.1",
-    "mammoth": "^1.10.0",
-    "@napi-rs/canvas": "^0.1.80"
+    "mammoth": "^1.10.0"
   },
   "devDependencies": {
     "@types/node": "latest",

@@ -1,6 +1,16 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import {
+  buildAnalysisBatches,
+  CODE_EXTENSIONS,
+  MANUAL_FILE_EXTENSIONS,
+  RESEARCH_EXTENSIONS,
+  extensionOf,
+  parseReportFileInBrowser,
+  preprocessResearchFiles,
+  shouldIgnoreProjectPath,
+} from "@/lib/client-file-parser";
 import type {
   Evidence,
   GroundedReport,
@@ -8,6 +18,8 @@ import type {
   ReportClaim,
   ReportDraft,
   ResearchAnalysis,
+  ResearchChunkAnalysis,
+  ResearchFinalizeResult,
 } from "@/lib/types";
 
 type PaperPayload = {
@@ -20,33 +32,10 @@ type BrowserFile = File & { webkitRelativePath?: string };
 type BusyMode = "analyze" | "report" | "papers" | "import-report" | "ground" | "develop" | null;
 type ReportMode = "existing" | "new";
 
-const CODE_EXTENSIONS = [
-  "py", "ipynb", "js", "jsx", "ts", "tsx",
-  "java", "c", "h", "cpp", "hpp", "cc", "cxx", "cs", "cu", "cuh",
-  "go", "rs", "kt", "kts", "swift", "scala",
-  "rb", "php", "lua", "dart", "r", "m",
-  "sh", "bash", "zsh", "ps1", "bat", "cmd",
-  "sql", "html", "htm", "css", "scss", "less", "vue", "svelte",
-  "xml", "toml", "ini", "cfg", "conf", "proto", "tex", "urdf", "xacro", "sdf", "usda",
-];
-const SUPPORTED_FOLDER_EXTENSIONS = new Set([
-  "csv", "txt", "md", "log", "json", "yaml", "yml", "pdf", ...CODE_EXTENSIONS,
-]);
-const SUPPORTED_FILE_EXTENSIONS = new Set([...SUPPORTED_FOLDER_EXTENSIONS, "zip"]);
-const IGNORED_PROJECT_DIRS = new Set([
-  ".git", ".next", ".idea", ".vscode",
-  "node_modules", "dist", "build", "coverage",
-  "venv", ".venv", "env", "__pycache__", ".pytest_cache",
-  "checkpoints", "checkpoint", "weights",
-]);
-const MAX_SELECTED_FILES = 100;
-const MAX_FOLDER_FILE_SIZE = 20 * 1024 * 1024;
-const MAX_MANUAL_ZIP_SIZE = 30 * 1024 * 1024;
-
-function extensionOf(name: string) {
-  const parts = name.toLowerCase().split(".");
-  return parts.length > 1 ? parts.at(-1)! : "";
-}
+const MAX_SELECTED_FILES = 150;
+const MAX_FOLDER_FILE_SIZE = 40 * 1024 * 1024;
+const MAX_MANUAL_ZIP_SIZE = 80 * 1024 * 1024;
+const MAX_ANALYSIS_BATCHES = 30;
 
 function displayPath(file: File) {
   const relativePath = (file as BrowserFile).webkitRelativePath;
@@ -58,13 +47,19 @@ function fileKey(file: File) {
 }
 
 function isIgnoredProjectPath(file: File) {
-  const path = displayPath(file).replace(/\\/g, "/").toLowerCase();
-  return path.split("/").some((part) => IGNORED_PROJECT_DIRS.has(part));
+  return shouldIgnoreProjectPath(displayPath(file));
 }
 
 async function readJsonOrThrow(response: Response) {
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.error || "요청에 실패했습니다.");
+  const text = await response.text();
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    if (!response.ok) throw new Error(text || `HTTP ${response.status}`);
+    throw new Error("서버가 JSON이 아닌 응답을 반환했습니다.");
+  }
+  if (!response.ok) throw new Error(json?.error || text || "요청에 실패했습니다.");
   return json;
 }
 
@@ -84,6 +79,7 @@ export default function HomePage() {
   const [busy, setBusy] = useState<BusyMode>(null);
   const [error, setError] = useState("");
   const [uploadNotice, setUploadNotice] = useState("");
+  const [analysisProgress, setAnalysisProgress] = useState("");
 
   const evidenceMap = useMemo(() => {
     const map = new Map<string, Evidence>();
@@ -92,7 +88,7 @@ export default function HomePage() {
   }, [analysis]);
 
   function addFiles(newFiles: File[], source: "files" | "folder" = "files") {
-    const supported = source === "folder" ? SUPPORTED_FOLDER_EXTENSIONS : SUPPORTED_FILE_EXTENSIONS;
+    const supported = source === "folder" ? RESEARCH_EXTENSIONS : MANUAL_FILE_EXTENSIONS;
     const filtered: File[] = [];
     let unsupported = 0;
     let oversized = 0;
@@ -135,11 +131,11 @@ export default function HomePage() {
     if (source === "folder") {
       messages.push(`폴더에서 분석 가능한 파일 ${accepted.length}개를 추가했습니다.`);
       if (unsupported) messages.push(`모델/바이너리/빌드 산출물 등 ${unsupported}개는 제외했습니다.`);
-      if (oversized) messages.push(`20MB를 넘는 분석 파일 ${oversized}개는 제외했습니다.`);
+      if (oversized) messages.push(`40MB를 넘는 분석 파일 ${oversized}개는 제외했습니다.`);
     } else {
       if (accepted.length) messages.push(`파일 ${accepted.length}개를 추가했습니다.`);
       if (unsupported) messages.push(`지원하지 않는 파일 ${unsupported}개는 제외했습니다.`);
-      if (oversized) messages.push(`30MB를 넘는 ZIP ${oversized}개는 제외했습니다.`);
+      if (oversized) messages.push(`80MB를 넘는 ZIP ${oversized}개는 제외했습니다. 큰 프로젝트는 폴더 선택을 사용하세요.`);
     }
     if (overLimit) messages.push(`분석 대상은 최대 ${MAX_SELECTED_FILES}개라 ${overLimit}개를 추가하지 않았습니다.`);
     setUploadNotice(messages.join(" "));
@@ -158,21 +154,126 @@ export default function HomePage() {
     if (!files.length) return;
     setBusy("analyze");
     setError("");
+    setAnalysisProgress("브라우저에서 연구자료를 텍스트로 변환하는 중...");
     setAnalysis(null);
     setReport(null);
     setGroundedReport(null);
     setPaperPayload(null);
     setSelectedClaim(null);
+
     try {
-      const form = new FormData();
-      files.forEach((file) => {
-        form.append("files", file);
-        form.append("filePaths", displayPath(file));
+      const preprocessed = await preprocessResearchFiles(files, displayPath);
+      if (!preprocessed.sources.length) {
+        throw new Error("분석 가능한 텍스트를 찾지 못했습니다.");
+      }
+
+      const batches = buildAnalysisBatches(preprocessed.sources, 220_000);
+      if (!batches.length) throw new Error("분석할 텍스트 배치를 만들지 못했습니다.");
+      if (batches.length > MAX_ANALYSIS_BATCHES) {
+        throw new Error(
+          `분석 텍스트가 너무 큽니다 (${batches.length}개 배치). 현재 MVP는 최대 ${MAX_ANALYSIS_BATCHES}개 배치까지 지원합니다. 대형 로그/CSV 중 불필요한 파일을 제외해 주세요.`,
+        );
+      }
+
+      const partials: ResearchChunkAnalysis[] = [];
+      for (let i = 0; i < batches.length; i++) {
+        const batch = batches[i];
+        setAnalysisProgress(
+          `브라우저 전처리 완료 · ${(preprocessed.extractedChars / 1_000_000).toFixed(2)}M chars · AI 배치 분석 ${i + 1}/${batches.length}`,
+        );
+        const response = await fetch("/api/analyze/chunk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ batchId: batch.batch_id, text: batch.text }),
+        });
+        partials.push((await readJsonOrThrow(response)) as ResearchChunkAnalysis);
+      }
+
+      setAnalysisProgress(`배치 ${batches.length}개 분석 완료 · Research Overview 통합 중...`);
+
+      const digest = partials.map((partial, index) => ({
+        batch_id: batches[index]?.batch_id || `B${index + 1}`,
+        chunk_summary: partial.chunk_summary,
+        methods: partial.methods.slice(0, 12),
+        experiments: partial.experiments.slice(0, 20),
+        findings: partial.findings.slice(0, 15).map((finding) => ({ text: finding.text, kind: finding.kind })),
+        concepts: partial.concepts.slice(0, 15),
+        warnings: partial.warnings.slice(0, 10),
+      }));
+
+      const finalizeResponse = await fetch("/api/analyze/finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chunks: digest, maxConcepts: 30 }),
       });
-      const response = await fetch("/api/analyze", { method: "POST", body: form });
-      setAnalysis((await readJsonOrThrow(response)) as ResearchAnalysis);
+      const finalized = (await readJsonOrThrow(finalizeResponse)) as ResearchFinalizeResult;
+
+      const sourceNameMap = new Map(preprocessed.sources.map((source) => [source.source_id, source.name]));
+      const evidence: Evidence[] = [];
+      const tempMaps: Array<Map<string, string>> = [];
+      let evidenceCounter = 1;
+
+      partials.forEach((partial) => {
+        const tempMap = new Map<string, string>();
+        partial.evidence.forEach((ev) => {
+          const id = `EV${String(evidenceCounter++).padStart(4, "0")}`;
+          tempMap.set(ev.temp_id, id);
+          evidence.push({
+            id,
+            type: ev.type,
+            content: ev.content,
+            experiment_id: ev.experiment_id,
+            source_id: ev.source_id,
+            source_name: sourceNameMap.get(ev.source_id) || ev.source_id,
+            source_location: ev.source_location,
+            raw_quote: ev.raw_quote,
+          });
+        });
+        tempMaps.push(tempMap);
+      });
+
+      const findingMap = new Map<string, { text: string; kind: "observed" | "inferred"; evidence_ids: string[] }>();
+      partials.forEach((partial, index) => {
+        const tempMap = tempMaps[index];
+        partial.findings.forEach((finding) => {
+          const key = `${finding.kind}:${finding.text.trim().toLowerCase()}`;
+          const evidenceIds = finding.evidence_temp_ids
+            .map((tempId) => tempMap.get(tempId))
+            .filter((id): id is string => Boolean(id));
+          const current = findingMap.get(key);
+          if (current) {
+            current.evidence_ids = Array.from(new Set([...current.evidence_ids, ...evidenceIds]));
+          } else {
+            findingMap.set(key, { text: finding.text, kind: finding.kind, evidence_ids: evidenceIds });
+          }
+        });
+      });
+
+      const analysisResult: ResearchAnalysis = {
+        ...finalized,
+        evidence,
+        findings: Array.from(findingMap.values()),
+        source_files: preprocessed.sources.map((source) => ({
+          source_id: source.source_id,
+          name: source.name,
+          type: source.type,
+          segment_count: source.segments.length,
+        })),
+        warnings: Array.from(new Set([
+          ...finalized.warnings,
+          ...preprocessed.warnings,
+          ...partials.flatMap((partial) => partial.warnings),
+          ...(preprocessed.ignoredFiles ? [`지원하지 않거나 제외 대상인 파일 ${preprocessed.ignoredFiles}개는 분석하지 않았습니다.`] : []),
+        ])),
+      };
+
+      setAnalysis(analysisResult);
+      setAnalysisProgress(
+        `완료 · ${preprocessed.sources.length} files · ${batches.length} AI batches · ${evidence.length} evidence`,
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "분석 오류");
+      setAnalysisProgress("");
     } finally {
       setBusy(null);
     }
@@ -182,12 +283,10 @@ export default function HomePage() {
     setBusy("import-report");
     setError("");
     try {
-      const form = new FormData();
-      form.append("file", file);
-      const response = await fetch("/api/report/import", { method: "POST", body: form });
-      const payload = await readJsonOrThrow(response);
-      setExistingReportText(payload.text);
-      setExistingReportName(payload.name);
+      const text = await parseReportFileInBrowser(file);
+      if (!text.trim()) throw new Error("보고서에서 읽을 수 있는 텍스트를 찾지 못했습니다.");
+      setExistingReportText(text.slice(0, 180_000));
+      setExistingReportName(file.name);
       setGroundedReport(null);
       setReport(null);
       setSelectedClaim(null);
@@ -303,7 +402,7 @@ export default function HomePage() {
       <section className="panel">
         <div className="section-heading">
           <div><span className="step">01</span><h2>연구 근거자료 업로드</h2></div>
-          <span className="muted">문서 · 데이터 · 코드 · PDF · ZIP</span>
+          <span className="muted">브라우저 전처리 · 원본 대용량 업로드 없음</span>
         </div>
         <div className="upload-grid">
           <label className="drop-zone">
@@ -317,7 +416,7 @@ export default function HomePage() {
               }}
             />
             <strong>파일 추가</strong>
-            <span>여러 번 선택해도 기존 목록에 누적됩니다. 작은 ZIP도 추가할 수 있습니다.</span>
+            <span>여러 번 선택해도 누적됩니다. ZIP은 80MB 이하, 큰 프로젝트는 폴더 선택을 권장합니다.</span>
           </label>
 
           <label className="drop-zone folder-zone">
@@ -331,16 +430,17 @@ export default function HomePage() {
               }}
             />
             <strong>프로젝트 폴더 추가</strong>
-            <span>소스코드는 포함하고 모델 가중치·데이터셋·빌드 산출물 등은 제외합니다.</span>
+            <span>소스코드/문서만 브라우저에서 읽고 .pt/.pth/ckpt·데이터셋·빌드 산출물은 전송하지 않습니다.</span>
           </label>
         </div>
 
         <div className="upload-summary">
           <strong>{files.length ? `현재 분석 대상 ${files.length}개` : "아직 선택된 연구자료가 없습니다."}</strong>
-          <span>파일/폴더를 여러 번 추가해도 기존 선택은 유지됩니다.</span>
+          <span>원본 파일은 Vercel API로 보내지 않고 브라우저에서 텍스트/구조 데이터로 변환한 뒤 작은 배치만 전송합니다.</span>
         </div>
 
         {uploadNotice && <div className="upload-notice">{uploadNotice}</div>}
+        {analysisProgress && <div className="upload-notice progress-notice">{analysisProgress}</div>}
 
         {files.length > 0 && (
           <div className="selected-files">
@@ -364,7 +464,7 @@ export default function HomePage() {
 
         <div className="actions">
           <button className="primary" onClick={analyze} disabled={!files.length || busy !== null}>
-            {busy === "analyze" ? "분석 중..." : `연구자료 분석 (${files.length})`}
+            {busy === "analyze" ? "전처리/배치 분석 중..." : `연구자료 분석 (${files.length})`}
           </button>
         </div>
       </section>
@@ -654,7 +754,7 @@ export default function HomePage() {
       )}
 
       <footer>
-        기본 흐름: 기존 보고서가 있으면 원문을 먼저 Evidence와 연결하고, 필요할 때만 개선합니다. 기존 보고서가 없을 때만 새 초안을 생성합니다.
+        기본 흐름: 연구자료는 브라우저에서 먼저 텍스트로 변환해 작은 배치로 분석합니다. 기존 보고서가 있으면 원문을 Evidence와 연결하고, 없을 때만 새 초안을 생성합니다.
       </footer>
     </main>
   );

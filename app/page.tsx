@@ -32,6 +32,7 @@ type PaperPayload = {
 type BrowserFile = File & { webkitRelativePath?: string };
 type BusyMode = "analyze" | "report" | "papers" | "import-report" | "ground" | "develop" | null;
 type ReportMode = "existing" | "new";
+type DownloadScope = "report" | "all";
 
 const MAX_SELECTED_FILES = 150;
 const MAX_FOLDER_FILE_SIZE = 40 * 1024 * 1024;
@@ -145,6 +146,7 @@ export default function HomePage() {
   const [showGuide, setShowGuide] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [showDownloadMenu, setShowDownloadMenu] = useState(false);
+  const [downloadScope, setDownloadScope] = useState<DownloadScope>("report");
 
   const evidenceMap = useMemo(() => {
     const map = new Map<string, Evidence>();
@@ -659,14 +661,15 @@ export default function HomePage() {
       .replace(/'/g, "&#039;");
   }
 
-  function buildArtifactHtml() {
+  function buildArtifactHtml(scope: DownloadScope = "all") {
     const sections: string[] = [];
-    const sourceList = files.length
+    const reportOnly = scope === "report";
+    const sourceList = !reportOnly && files.length
       ? `<section><h2>입력 자료</h2><ol>${files.map((file) => `<li>${escapeHtml(displayPath(file))}</li>`).join("")}</ol></section>`
       : "";
     if (sourceList) sections.push(sourceList);
 
-    if (analysis) {
+    if (!reportOnly && analysis) {
       const findings = analysis.findings.length
         ? `<h3>주요 Finding</h3><div class="items">${analysis.findings.map((finding) => {
             const label = finding.kind === "observed" ? "관찰" : "해석";
@@ -680,7 +683,7 @@ export default function HomePage() {
       sections.push(`<section><h2>Research Overview</h2><div class="topic">${escapeHtml(analysis.research_topic)}</div>${analysis.objective ? `<div class="objective">${escapeHtml(analysis.objective)}</div>` : ""}<p>${escapeHtml(analysis.summary)}</p>${findings}${evidence}</section>`);
     }
 
-    if (groundedReport) {
+    if (!reportOnly && groundedReport) {
       const paragraphs = groundedReport.paragraphs.map((paragraph) => {
         const claims = paragraph.claims.filter((claim) => claim.type !== "narrative");
         const claimHtml = claims.length
@@ -693,10 +696,13 @@ export default function HomePage() {
 
     if (report) {
       const reportSections = report.sections.map((section) => `<div class="report-section"><h3>${escapeHtml(section.heading)}</h3>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph.text)}</p>`).join("")}</div>`).join("");
-      sections.push(`<section><h2>생성·개선 보고서</h2><div class="topic">${escapeHtml(report.title)}</div>${reportSections}</section>`);
+      sections.push(`<section><h2>${reportOnly ? "보고서" : "생성·개선 보고서"}</h2><div class="topic">${escapeHtml(report.title)}</div>${reportSections}</section>`);
+    } else if (reportOnly && groundedReport) {
+      const paragraphs = groundedReport.paragraphs.map((paragraph) => `<div class="report-section"><p>${escapeHtml(paragraph.text)}</p></div>`).join("");
+      sections.push(`<section><h2>보고서</h2><div class="topic">${escapeHtml(groundedReport.title)}</div>${paragraphs}</section>`);
     }
 
-    if (paperPayload?.papers.length) {
+    if (!reportOnly && paperPayload?.papers.length) {
       const papers = paperPayload.papers.map((paper, index) => {
         const meta = [paper.year, paper.authors.join(", "), paper.venue].filter(Boolean).map(escapeHtml).join(" · ");
         const concepts = paper.matched_concepts.map((concept) => concept.name).join(", ");
@@ -738,17 +744,19 @@ export default function HomePage() {
         a { color: #175e9c; text-decoration: underline; word-break: break-all; }
         .export-footer { margin-top: 28px; padding-top: 14px; border-top: 1px solid #dfe5ec; color: #687587; font-size: 10px; }
       </style>
-      <header class="export-header"><div class="export-kicker">RESEARCH2REPORT EXPORT</div><h1>Research2Report 산출물</h1><div class="meta">작성자 · 24100017 신현종</div><div class="meta">내보낸 시각 · ${escapeHtml(new Date().toLocaleString("ko-KR"))}</div></header>
+      <header class="export-header"><div class="export-kicker">RESEARCH2REPORT EXPORT</div><h1>${reportOnly ? "Research2Report 보고서" : "Research2Report 산출물"}</h1><div class="meta">작성자 · 24100017 신현종</div><div class="meta">내보낸 시각 · ${escapeHtml(new Date().toLocaleString("ko-KR"))}</div></header>
       ${sections.join("")}
-      <footer class="export-footer">생성형 AI 결과는 최종 사용 전 Evidence와 원문을 확인해야 합니다. 관련 문헌은 검색 후보이며 실제 인용 전 원문 검토가 필요합니다.</footer>
+      <footer class="export-footer">${reportOnly ? "생성형 AI로 작성된 문장은 최종 제출 전 원자료와 근거를 확인해 주세요." : "생성형 AI 결과는 최종 사용 전 Evidence와 원문을 확인해야 합니다. 관련 문헌은 검색 후보이며 실제 인용 전 원문 검토가 필요합니다."}</footer>
     </div>`;
   }
 
-  async function downloadWordArtifacts() {
-    if (!analysis && !groundedReport && !report && !paperPayload) return;
+  async function downloadWordArtifacts(scope: DownloadScope) {
+    if (scope === "report" && !report && !groundedReport) return;
+    if (scope === "all" && !analysis && !groundedReport && !report && !paperPayload) return;
     setDownloading(true);
     setError("");
     try {
+      const reportOnly = scope === "report";
       const {
         AlignmentType,
         BorderStyle,
@@ -775,14 +783,14 @@ export default function HomePage() {
 
       children.push(
         new Paragraph({
-          children: [new TextRun({ text: "Research2Report 분석 산출물", bold: true, size: 38, color: "173F76" })],
+          children: [new TextRun({ text: reportOnly ? "Research2Report 보고서" : "Research2Report 분석 산출물", bold: true, size: 38, color: "173F76" })],
           spacing: { after: 120 },
         }),
         muted("작성자 · 24100017 신현종"),
         muted(`내보낸 시각 · ${new Date().toLocaleString("ko-KR")}`),
       );
 
-      if (analysis) {
+      if (!reportOnly && analysis) {
         children.push(heading("1. Research Overview"));
         children.push(body(analysis.research_topic, true));
         if (analysis.objective) children.push(muted(`목적 · ${analysis.objective}`));
@@ -830,7 +838,7 @@ export default function HomePage() {
         }
       }
 
-      if (groundedReport) {
+      if (!reportOnly && groundedReport) {
         children.push(heading("3. 기존 보고서 Evidence 연결"));
         children.push(body(groundedReport.title, true));
         children.push(muted(`Claims ${groundedReport.stats.total_claims} · Internal ${groundedReport.stats.internally_supported} · Citation Needed ${groundedReport.stats.citation_needed} · Unsupported ${groundedReport.stats.unsupported}`));
@@ -843,15 +851,19 @@ export default function HomePage() {
       }
 
       if (report) {
-        children.push(heading(groundedReport ? "4. 근거 기반 개선 보고서" : "3. 근거 기반 보고서"));
+        children.push(heading(reportOnly ? "보고서" : (groundedReport ? "4. 근거 기반 개선 보고서" : "3. 근거 기반 보고서")));
         children.push(body(report.title, true));
         report.sections.forEach((section) => {
           children.push(heading(section.heading, HeadingLevel.HEADING_2));
           section.paragraphs.forEach((paragraph) => children.push(body(paragraph.text)));
         });
+      } else if (reportOnly && groundedReport) {
+        children.push(heading("보고서"));
+        children.push(body(groundedReport.title, true));
+        groundedReport.paragraphs.forEach((paragraph) => children.push(body(paragraph.text)));
       }
 
-      if (paperPayload?.papers.length) {
+      if (!reportOnly && paperPayload?.papers.length) {
         children.push(heading("관련 문헌 후보"));
         children.push(muted("관련도 기반 검색 후보이며 실제 인용 전 원문 검토가 필요합니다."));
         paperPayload.papers.slice(0, 50).forEach((paper, index) => {
@@ -865,7 +877,7 @@ export default function HomePage() {
 
       children.push(heading("확인 사항"));
       children.push(bullet("생성형 AI의 해석과 보고서 문장은 최종 사용 전 Evidence와 원문을 확인해야 합니다."));
-      children.push(bullet("관련 문헌은 검색 후보이며, 실제 인용 전 원문을 직접 검토해야 합니다."));
+      if (!reportOnly) children.push(bullet("관련 문헌은 검색 후보이며, 실제 인용 전 원문을 직접 검토해야 합니다."));
 
       const doc = new Document({
         styles: {
@@ -883,7 +895,7 @@ export default function HomePage() {
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `Research2Report_${new Date().toISOString().slice(0, 10)}.docx`;
+      anchor.download = `Research2Report_${reportOnly ? "report" : "full"}_${new Date().toISOString().slice(0, 10)}.docx`;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
@@ -896,21 +908,22 @@ export default function HomePage() {
     }
   }
 
-  function downloadPdfArtifacts() {
-    if (!analysis && !groundedReport && !report && !paperPayload) return;
+  function downloadPdfArtifacts(scope: DownloadScope) {
+    if (scope === "report" && !report && !groundedReport) return;
+    if (scope === "all" && !analysis && !groundedReport && !report && !paperPayload) return;
     setDownloading(true);
     setError("");
     try {
       const printWindow = window.open("", "Research2ReportPrint", "width=1040,height=900");
       if (!printWindow) throw new Error("PDF 출력을 위해 팝업을 허용해 주세요.");
 
-      const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>Research2Report 산출물</title><style>
+      const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>${scope === "report" ? "Research2Report 보고서" : "Research2Report 산출물"}</title><style>
         @page { size: A4; margin: 12mm 11mm 14mm; }
         html, body { margin: 0; padding: 0; background: #fff; }
         body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
         .export-document { width: auto !important; min-height: 0 !important; padding: 0 !important; }
         @media print { a { color: #175e9c !important; } }
-      </style></head><body>${buildArtifactHtml()}<script>
+      </style></head><body>${buildArtifactHtml(scope)}<script>
         window.addEventListener('load', async () => {
           try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
           setTimeout(() => { window.focus(); window.print(); }, 250);
@@ -928,9 +941,12 @@ export default function HomePage() {
     }
   }
 
-  async function downloadPngArtifacts() {
-    const target = document.querySelector(".page-shell") as HTMLElement | null;
-    if (!target) return;
+  async function downloadPngArtifacts(scope: DownloadScope) {
+    if (scope === "report" && !report && !groundedReport) return;
+    const pageTarget = document.querySelector(".page-shell") as HTMLElement | null;
+    if (scope === "all" && !pageTarget) return;
+    let tempTarget: HTMLElement | null = null;
+    let target: HTMLElement | null = pageTarget;
     setDownloading(true);
     setError("");
     try {
@@ -939,7 +955,20 @@ export default function HomePage() {
       const html2canvas = (module.default || module) as typeof import("html2canvas").default;
       if (document.fonts?.ready) await document.fonts.ready;
 
-      target.classList.add("capture-mode");
+      if (scope === "report") {
+        tempTarget = document.createElement("div");
+        tempTarget.className = "report-export-capture";
+        tempTarget.style.position = "fixed";
+        tempTarget.style.left = "-10000px";
+        tempTarget.style.top = "0";
+        tempTarget.style.zIndex = "-1";
+        tempTarget.innerHTML = buildArtifactHtml("report");
+        document.body.appendChild(tempTarget);
+        target = tempTarget.querySelector(".export-document") as HTMLElement | null;
+      }
+      if (!target) throw new Error("PNG로 저장할 내용을 찾지 못했습니다.");
+
+      if (scope === "all") target.classList.add("capture-mode");
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 
       const maxCanvasHeight = 30000;
@@ -961,7 +990,7 @@ export default function HomePage() {
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `Research2Report_screen_${new Date().toISOString().slice(0, 10)}.png`;
+      anchor.download = `Research2Report_${scope === "report" ? "report" : "screen"}_${new Date().toISOString().slice(0, 10)}.png`;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
@@ -969,12 +998,15 @@ export default function HomePage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "PNG 다운로드 오류");
     } finally {
-      target.classList.remove("capture-mode");
+      if (pageTarget) pageTarget.classList.remove("capture-mode");
+      if (tempTarget?.parentNode) tempTarget.parentNode.removeChild(tempTarget);
       setDownloading(false);
     }
   }
 
   const hasDownloadableArtifacts = Boolean(analysis || groundedReport || report || paperPayload);
+  const hasReportArtifact = Boolean(report || groundedReport);
+  const activeDownloadScope: DownloadScope = downloadScope === "report" && hasReportArtifact ? "report" : "all";
 
   const selectedEvidence = selectedClaim?.evidence_ids
     .map((id) => evidenceMap.get(id))
@@ -1008,9 +1040,31 @@ export default function HomePage() {
               </button>
               {showDownloadMenu && !downloading && (
                 <div className="download-menu">
-                  <button type="button" onClick={downloadPdfArtifacts}><strong>PDF 보고서</strong><span>인쇄 창에서 PDF로 저장</span></button>
-                  <button type="button" onClick={downloadWordArtifacts}><strong>Word (.docx)</strong><span>수정 가능한 보고서</span></button>
-                  <button type="button" onClick={downloadPngArtifacts}><strong>화면 이미지 (.png)</strong><span>현재 웹 결과 화면을 그대로 저장</span></button>
+                  <div className="download-menu-label">다운로드 범위</div>
+                  <div className="download-scope-options">
+                    <button
+                      type="button"
+                      className={activeDownloadScope === "report" ? "scope-option active" : "scope-option"}
+                      onClick={() => setDownloadScope("report")}
+                      disabled={!hasReportArtifact}
+                    >
+                      <strong>보고서만</strong>
+                      <span>{hasReportArtifact ? "생성·개선된 보고서 본문만" : "보고서 생성 후 선택 가능"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={activeDownloadScope === "all" ? "scope-option active" : "scope-option"}
+                      onClick={() => setDownloadScope("all")}
+                    >
+                      <strong>전체 산출물</strong>
+                      <span>Overview · Evidence · 보고서 · 문헌 포함</span>
+                    </button>
+                  </div>
+                  <div className="download-menu-divider" />
+                  <div className="download-menu-label">파일 형식</div>
+                  <button type="button" onClick={() => downloadPdfArtifacts(activeDownloadScope)}><strong>PDF</strong><span>선택한 범위를 인쇄용 문서로 저장</span></button>
+                  <button type="button" onClick={() => downloadWordArtifacts(activeDownloadScope)}><strong>Word (.docx)</strong><span>선택한 범위를 수정 가능한 문서로 저장</span></button>
+                  <button type="button" onClick={() => downloadPngArtifacts(activeDownloadScope)}><strong>PNG</strong><span>{activeDownloadScope === "report" ? "보고서 문서를 이미지로 저장" : "현재 전체 화면을 이미지로 저장"}</span></button>
                 </div>
               )}
             </div>

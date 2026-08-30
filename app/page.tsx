@@ -744,64 +744,232 @@ export default function HomePage() {
     </div>`;
   }
 
-  function downloadTextArtifacts() {
+  async function downloadWordArtifacts() {
     if (!analysis && !groundedReport && !report && !paperPayload) return;
     setDownloading(true);
     setError("");
     try {
-      const blob = new Blob([buildArtifactText()], { type: "text/plain;charset=utf-8" });
+      const {
+        AlignmentType,
+        BorderStyle,
+        Document,
+        HeadingLevel,
+        Packer,
+        Paragraph,
+        Table,
+        TableCell,
+        TableRow,
+        TextRun,
+        WidthType,
+      } = await import("docx");
+
+      const children: any[] = [];
+      const heading = (text: string, level: typeof HeadingLevel[keyof typeof HeadingLevel] = HeadingLevel.HEADING_1) =>
+        new Paragraph({ text, heading: level, spacing: { before: 260, after: 120 } });
+      const body = (text: string, bold = false) =>
+        new Paragraph({ children: [new TextRun({ text, bold, size: 21 })], spacing: { after: 110 }, alignment: AlignmentType.LEFT });
+      const muted = (text: string) =>
+        new Paragraph({ children: [new TextRun({ text, color: "667085", size: 18 })], spacing: { after: 80 } });
+      const bullet = (text: string) =>
+        new Paragraph({ children: [new TextRun({ text, size: 20 })], bullet: { level: 0 }, spacing: { after: 60 } });
+
+      children.push(
+        new Paragraph({
+          children: [new TextRun({ text: "Research2Report 분석 산출물", bold: true, size: 38, color: "173F76" })],
+          spacing: { after: 120 },
+        }),
+        muted("작성자 · 24100017 신현종"),
+        muted(`내보낸 시각 · ${new Date().toLocaleString("ko-KR")}`),
+      );
+
+      if (analysis) {
+        children.push(heading("1. Research Overview"));
+        children.push(body(analysis.research_topic, true));
+        if (analysis.objective) children.push(muted(`목적 · ${analysis.objective}`));
+        children.push(body(analysis.summary));
+
+        if (analysis.concepts.length) {
+          children.push(heading("Research Concepts", HeadingLevel.HEADING_2));
+          const rows = [
+            new TableRow({
+              children: ["순위", "Concept", "설명", "Score"].map((text) => new TableCell({
+                children: [new Paragraph({ children: [new TextRun({ text, bold: true, size: 18 })] })],
+                shading: { fill: "EEF4FB" },
+              })),
+              tableHeader: true,
+            }),
+            ...analysis.concepts.slice(0, 30).map((concept, index) => new TableRow({
+              children: [
+                String(index + 1),
+                concept.name_en,
+                concept.name_ko,
+                String(Math.round(concept.importance * 100)),
+              ].map((text) => new TableCell({ children: [new Paragraph({ children: [new TextRun({ text, size: 17 })] })] })),
+            })),
+          ];
+          children.push(new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }));
+        }
+
+        if (analysis.findings.length) {
+          children.push(heading("주요 Finding", HeadingLevel.HEADING_2));
+          analysis.findings.forEach((finding) => {
+            const label = finding.kind === "observed" ? "관찰" : "해석";
+            children.push(body(`[${label}] ${finding.text}`));
+            if (finding.evidence_ids.length) children.push(muted(`Evidence · ${finding.evidence_ids.join(", ")}`));
+          });
+        }
+
+        if (analysis.evidence.length) {
+          children.push(heading("2. Evidence Map"));
+          analysis.evidence.forEach((ev) => {
+            children.push(body(`${ev.id} · ${ev.type}`, true));
+            children.push(body(ev.content));
+            children.push(muted(`${ev.source_name}${ev.source_location ? ` · ${ev.source_location}` : ""}`));
+            if (ev.raw_quote) children.push(muted(`원문 · ${ev.raw_quote}`));
+          });
+        }
+      }
+
+      if (groundedReport) {
+        children.push(heading("3. 기존 보고서 Evidence 연결"));
+        children.push(body(groundedReport.title, true));
+        children.push(muted(`Claims ${groundedReport.stats.total_claims} · Internal ${groundedReport.stats.internally_supported} · Citation Needed ${groundedReport.stats.citation_needed} · Unsupported ${groundedReport.stats.unsupported}`));
+        groundedReport.paragraphs.forEach((paragraph) => {
+          children.push(body(paragraph.text));
+          paragraph.claims.filter((claim) => claim.type !== "narrative").forEach((claim) => {
+            children.push(muted(`${claim.type} · ${claim.text}${claim.evidence_ids.length ? ` · Evidence ${claim.evidence_ids.join(", ")}` : ""}${claim.citation_required ? " · Citation Needed" : ""}`));
+          });
+        });
+      }
+
+      if (report) {
+        children.push(heading(groundedReport ? "4. 근거 기반 개선 보고서" : "3. 근거 기반 보고서"));
+        children.push(body(report.title, true));
+        report.sections.forEach((section) => {
+          children.push(heading(section.heading, HeadingLevel.HEADING_2));
+          section.paragraphs.forEach((paragraph) => children.push(body(paragraph.text)));
+        });
+      }
+
+      if (paperPayload?.papers.length) {
+        children.push(heading("관련 문헌 후보"));
+        children.push(muted("관련도 기반 검색 후보이며 실제 인용 전 원문 검토가 필요합니다."));
+        paperPayload.papers.slice(0, 50).forEach((paper, index) => {
+          children.push(body(`${index + 1}. ${paper.title}`, true));
+          children.push(muted([paper.year, paper.authors.join(", "), paper.venue].filter(Boolean).join(" · ")));
+          if (paper.matched_concepts.length) children.push(muted(`관련 키워드 · ${paper.matched_concepts.map((concept) => concept.name).join(", ")}`));
+          children.push(muted(`관련도 점수 · ${paper.final_score.toFixed(1)}`));
+          if (paper.url) children.push(body(paper.url));
+        });
+      }
+
+      children.push(heading("확인 사항"));
+      children.push(bullet("생성형 AI의 해석과 보고서 문장은 최종 사용 전 Evidence와 원문을 확인해야 합니다."));
+      children.push(bullet("관련 문헌은 검색 후보이며, 실제 인용 전 원문을 직접 검토해야 합니다."));
+
+      const doc = new Document({
+        styles: {
+          default: {
+            document: { run: { font: "Malgun Gothic", size: 21 }, paragraph: { spacing: { line: 300 } } },
+          },
+        },
+        sections: [{
+          properties: { page: { margin: { top: 900, right: 900, bottom: 900, left: 900 } } },
+          children,
+        }],
+      });
+
+      const blob = await Packer.toBlob(doc);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `Research2Report_${new Date().toISOString().slice(0, 10)}.txt`;
+      anchor.download = `Research2Report_${new Date().toISOString().slice(0, 10)}.docx`;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
       setShowDownloadMenu(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "TXT 다운로드 오류");
+      setError(e instanceof Error ? e.message : "Word 다운로드 오류");
     } finally {
       setDownloading(false);
     }
   }
 
-  async function downloadPdfArtifacts() {
+  function downloadPdfArtifacts() {
     if (!analysis && !groundedReport && !report && !paperPayload) return;
     setDownloading(true);
     setError("");
-    let container: HTMLDivElement | null = null;
     try {
-      const module = await import("html2pdf.js");
-      const html2pdf = (module.default || module) as any;
-      if (document.fonts?.ready) await document.fonts.ready;
+      const printWindow = window.open("", "Research2ReportPrint", "width=1040,height=900");
+      if (!printWindow) throw new Error("PDF 출력을 위해 팝업을 허용해 주세요.");
 
-      container = document.createElement("div");
-      container.style.position = "fixed";
-      container.style.left = "-10000px";
-      container.style.top = "0";
-      container.style.width = "760px";
-      container.style.background = "#fff";
-      container.innerHTML = buildArtifactHtml();
-      document.body.appendChild(container);
-
-      await html2pdf()
-        .set({
-          margin: [8, 8, 10, 8],
-          filename: `Research2Report_${new Date().toISOString().slice(0, 10)}.pdf`,
-          image: { type: "jpeg", quality: 0.97 },
-          html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff", logging: false },
-          jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-          pagebreak: { mode: ["css", "legacy"] },
-          enableLinks: true,
-        })
-        .from(container)
-        .save();
+      const html = `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>Research2Report 산출물</title><style>
+        @page { size: A4; margin: 12mm 11mm 14mm; }
+        html, body { margin: 0; padding: 0; background: #fff; }
+        body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        .export-document { width: auto !important; min-height: 0 !important; padding: 0 !important; }
+        @media print { a { color: #175e9c !important; } }
+      </style></head><body>${buildArtifactHtml()}<script>
+        window.addEventListener('load', async () => {
+          try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
+          setTimeout(() => { window.focus(); window.print(); }, 250);
+        });
+        window.addEventListener('afterprint', () => window.close());
+      <\/script></body></html>`;
+      printWindow.document.open();
+      printWindow.document.write(html);
+      printWindow.document.close();
       setShowDownloadMenu(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "PDF 다운로드 오류");
+      setError(e instanceof Error ? e.message : "PDF 출력 오류");
     } finally {
-      container?.remove();
+      setDownloading(false);
+    }
+  }
+
+  async function downloadPngArtifacts() {
+    const target = document.querySelector(".page-shell") as HTMLElement | null;
+    if (!target) return;
+    setDownloading(true);
+    setError("");
+    try {
+      setShowDownloadMenu(false);
+      const module = await import("html2canvas");
+      const html2canvas = (module.default || module) as typeof import("html2canvas").default;
+      if (document.fonts?.ready) await document.fonts.ready;
+
+      target.classList.add("capture-mode");
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+      const maxCanvasHeight = 30000;
+      const baseScale = 1.35;
+      const safeScale = Math.max(0.65, Math.min(baseScale, maxCanvasHeight / Math.max(target.scrollHeight, 1)));
+      const canvas = await html2canvas(target, {
+        scale: safeScale,
+        useCORS: true,
+        backgroundColor: "#f5f7fb",
+        logging: false,
+        windowWidth: Math.max(1180, target.scrollWidth),
+        windowHeight: target.scrollHeight,
+        scrollX: 0,
+        scrollY: -window.scrollY,
+      });
+
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png", 1));
+      if (!blob) throw new Error("PNG 생성에 실패했습니다.");
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `Research2Report_screen_${new Date().toISOString().slice(0, 10)}.png`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "PNG 다운로드 오류");
+    } finally {
+      target.classList.remove("capture-mode");
       setDownloading(false);
     }
   }
@@ -840,8 +1008,9 @@ export default function HomePage() {
               </button>
               {showDownloadMenu && !downloading && (
                 <div className="download-menu">
-                  <button type="button" onClick={downloadPdfArtifacts}><strong>PDF</strong><span>보기 좋은 문서 형태</span></button>
-                  <button type="button" onClick={downloadTextArtifacts}><strong>TXT</strong><span>전체 내용을 텍스트로 저장</span></button>
+                  <button type="button" onClick={downloadPdfArtifacts}><strong>PDF 보고서</strong><span>인쇄 창에서 PDF로 저장</span></button>
+                  <button type="button" onClick={downloadWordArtifacts}><strong>Word (.docx)</strong><span>수정 가능한 보고서</span></button>
+                  <button type="button" onClick={downloadPngArtifacts}><strong>화면 이미지 (.png)</strong><span>현재 웹 결과 화면을 그대로 저장</span></button>
                 </div>
               )}
             </div>
@@ -862,7 +1031,7 @@ export default function HomePage() {
             <div className="guide-card"><strong>1. 자료 입력</strong><span>파일 또는 프로젝트 폴더를 선택합니다.</span></div>
             <div className="guide-card"><strong>2. Evidence 분석</strong><span>빠른/정밀 분석으로 핵심 결과와 원자료 위치를 구조화합니다.</span></div>
             <div className="guide-card"><strong>3. 보고서 작업</strong><span>기존 보고서에 Evidence를 연결하거나 새 보고서를 생성합니다.</span></div>
-            <div className="guide-card"><strong>4. 문헌·다운로드</strong><span>관련 문헌 후보를 확인하고 현재 산출물을 PDF 또는 TXT로 저장합니다.</span></div>
+            <div className="guide-card"><strong>4. 문헌·다운로드</strong><span>관련 문헌 후보를 확인하고 현재 산출물을 PDF·Word·PNG로 저장합니다.</span></div>
           </div>
           <div className="guide-note">관련 문헌은 후보 목록이며 실제 인용 전 원문 확인이 필요합니다. 생성형 AI 결과도 최종 제출 전 Evidence와 원문을 확인하세요.</div>
         </section>

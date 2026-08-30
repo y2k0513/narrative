@@ -224,3 +224,10 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; line-height: 1.
   .download-menu-wrap > .utility-button { width: 100%; }
   .download-menu { left: 0; right: auto; width: min(260px, 88vw); }
 }
+
+/* Screen capture export: keep the site layout, but expand scroll-only result areas. */
+.page-shell.capture-mode .download-menu { display: none !important; }
+.page-shell.capture-mode .concept-list,
+.page-shell.capture-mode .selected-file-list { max-height: none !important; overflow: visible !important; }
+.page-shell.capture-mode .evidence-panel { position: static !important; }
+.page-shell.capture-mode details { break-inside: avoid; }

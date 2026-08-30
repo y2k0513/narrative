@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import JSZip from "jszip";
 import {
   buildAnalysisBatches,
   CODE_EXTENSIONS,
@@ -145,6 +144,7 @@ export default function HomePage() {
   const [analysisDepth, setAnalysisDepth] = useState<AnalysisDepth>("fast");
   const [showGuide, setShowGuide] = useState(false);
   const [downloading, setDownloading] = useState(false);
+  const [showDownloadMenu, setShowDownloadMenu] = useState(false);
 
   const evidenceMap = useMemo(() => {
     const map = new Map<string, Evidence>();
@@ -536,168 +536,272 @@ export default function HomePage() {
     }
   }
 
-  function csvCell(value: unknown) {
-    const text = value == null ? "" : String(value);
-    return `"${text.replace(/"/g, '""')}"`;
-  }
-
-  function reportToMarkdown(draft: ReportDraft) {
-    const lines: string[] = [`# ${draft.title}`, ""];
+  function reportToPlainText(draft: ReportDraft) {
+    const lines: string[] = [draft.title, ""]; 
     for (const section of draft.sections) {
-      lines.push(`## ${section.heading}`, "");
+      lines.push(`[${section.heading}]`, "");
       for (const paragraph of section.paragraphs) {
         lines.push(paragraph.text, "");
         const claims = paragraph.claims.filter((claim) => claim.type !== "narrative");
-        if (claims.length) {
-          for (const claim of claims) {
-            lines.push(`- [${claim.id}] ${claim.type} · ${claim.text}`);
-            if (claim.evidence_ids.length) lines.push(`  - Evidence: ${claim.evidence_ids.join(", ")}`);
-            if (claim.citation_required) lines.push("  - Citation Needed");
-          }
-          lines.push("");
+        for (const claim of claims) {
+          lines.push(`- ${claim.id} / ${claim.type}: ${claim.text}`);
+          if (claim.evidence_ids.length) lines.push(`  Evidence: ${claim.evidence_ids.join(", ")}`);
+          if (claim.citation_required) lines.push("  Citation Needed");
         }
+        if (claims.length) lines.push("");
       }
     }
-    if (draft.warnings.length) {
-      lines.push("## Warnings", "", ...draft.warnings.map((warning) => `- ${warning}`), "");
-    }
+    if (draft.warnings.length) lines.push("[주의사항]", ...draft.warnings.map((warning) => `- ${warning}`), "");
     return lines.join("\n");
   }
 
-  function groundedReportToMarkdown(grounded: GroundedReport) {
-    const lines: string[] = [`# ${grounded.title}`, "", `Source: ${grounded.source_name}`, ""];
+  function groundedReportToPlainText(grounded: GroundedReport) {
+    const lines: string[] = [grounded.title, `원본: ${grounded.source_name}`, ""];
+    lines.push(
+      `Claims ${grounded.stats.total_claims} / Internal Evidence ${grounded.stats.internally_supported} / Citation Needed ${grounded.stats.citation_needed} / Unsupported ${grounded.stats.unsupported}`,
+      "",
+    );
     for (const paragraph of grounded.paragraphs) {
       lines.push(paragraph.text, "");
       const claims = paragraph.claims.filter((claim) => claim.type !== "narrative");
       for (const claim of claims) {
-        lines.push(`- [${claim.id}] ${claim.type} · ${claim.text}`);
-        if (claim.evidence_ids.length) lines.push(`  - Evidence: ${claim.evidence_ids.join(", ")}`);
-        if (claim.citation_required) lines.push("  - Citation Needed");
+        lines.push(`- ${claim.id} / ${claim.type}: ${claim.text}`);
+        if (claim.evidence_ids.length) lines.push(`  Evidence: ${claim.evidence_ids.join(", ")}`);
+        if (claim.citation_required) lines.push("  Citation Needed");
       }
       if (claims.length) lines.push("");
     }
+    if (grounded.warnings.length) lines.push("[주의사항]", ...grounded.warnings.map((warning) => `- ${warning}`), "");
     return lines.join("\n");
   }
 
-  async function downloadArtifacts() {
+  function buildArtifactText() {
+    const lines: string[] = [
+      "Research2Report 산출물",
+      "작성자: 24100017 신현종",
+      `내보낸 시각: ${new Date().toLocaleString("ko-KR")}`,
+      "",
+    ];
+
+    if (files.length) {
+      lines.push("========================================", "입력 자료", "========================================");
+      files.forEach((file, index) => lines.push(`${index + 1}. ${displayPath(file)}`));
+      lines.push("");
+    }
+
+    if (analysis) {
+      lines.push("========================================", "Research Overview", "========================================");
+      lines.push(`주제: ${analysis.research_topic}`);
+      if (analysis.objective) lines.push(`목적: ${analysis.objective}`);
+      lines.push("", analysis.summary, "");
+
+      if (analysis.findings.length) {
+        lines.push("[주요 Finding]");
+        analysis.findings.forEach((finding, index) => {
+          const label = finding.kind === "observed" ? "관찰" : "해석";
+          const evidence = finding.evidence_ids.length ? ` / Evidence: ${finding.evidence_ids.join(", ")}` : "";
+          lines.push(`${index + 1}. ${label}: ${finding.text}${evidence}`);
+        });
+        lines.push("");
+      }
+
+      if (analysis.evidence.length) {
+        lines.push("[Evidence Map]");
+        analysis.evidence.forEach((ev) => {
+          lines.push(`${ev.id} / ${ev.type}`);
+          lines.push(`내용: ${ev.content}`);
+          lines.push(`출처: ${ev.source_name}${ev.source_location ? ` · ${ev.source_location}` : ""}`);
+          if (ev.raw_quote) lines.push(`원문: ${ev.raw_quote}`);
+          lines.push("");
+        });
+      }
+    }
+
+    if (groundedReport) {
+      lines.push("========================================", "기존 보고서 Evidence 연결 결과", "========================================");
+      lines.push(groundedReportToPlainText(groundedReport), "");
+    }
+
+    if (report) {
+      lines.push("========================================", "생성·개선 보고서", "========================================");
+      lines.push(reportToPlainText(report), "");
+    }
+
+    if (paperPayload?.papers.length) {
+      lines.push("========================================", "관련 문헌 후보", "========================================");
+      paperPayload.papers.forEach((paper, index) => {
+        lines.push(`${index + 1}. ${paper.title}`);
+        const meta = [paper.year, paper.authors.join(", "), paper.venue].filter(Boolean).join(" · ");
+        if (meta) lines.push(meta);
+        if (paper.matched_concepts.length) lines.push(`관련 키워드: ${paper.matched_concepts.map((concept) => concept.name).join(", ")}`);
+        lines.push(`관련도 점수: ${paper.final_score}`);
+        if (paper.url) lines.push(`링크: ${paper.url}`);
+        lines.push("");
+      });
+    }
+
+    lines.push(
+      "========================================",
+      "확인 사항",
+      "========================================",
+      "- 생성형 AI의 해석과 보고서 문장은 최종 사용 전 Evidence와 원문을 확인해야 합니다.",
+      "- 관련 문헌은 검색 후보이며, 실제 인용 전 원문을 직접 검토해야 합니다.",
+    );
+    return lines.join("\n");
+  }
+
+  function escapeHtml(value: unknown) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function buildArtifactHtml() {
+    const sections: string[] = [];
+    const sourceList = files.length
+      ? `<section><h2>입력 자료</h2><ol>${files.map((file) => `<li>${escapeHtml(displayPath(file))}</li>`).join("")}</ol></section>`
+      : "";
+    if (sourceList) sections.push(sourceList);
+
+    if (analysis) {
+      const findings = analysis.findings.length
+        ? `<h3>주요 Finding</h3><div class="items">${analysis.findings.map((finding) => {
+            const label = finding.kind === "observed" ? "관찰" : "해석";
+            const ids = finding.evidence_ids.length ? `<div class="meta">Evidence · ${escapeHtml(finding.evidence_ids.join(", "))}</div>` : "";
+            return `<article class="item"><div class="badge">${label}</div><div>${escapeHtml(finding.text)}</div>${ids}</article>`;
+          }).join("")}</div>`
+        : "";
+      const evidence = analysis.evidence.length
+        ? `<h3>Evidence Map</h3><div class="items">${analysis.evidence.map((ev) => `<article class="item evidence"><div class="evidence-head"><strong>${escapeHtml(ev.id)}</strong><span>${escapeHtml(ev.type)}</span></div><div>${escapeHtml(ev.content)}</div><div class="meta">${escapeHtml(ev.source_name)}${ev.source_location ? ` · ${escapeHtml(ev.source_location)}` : ""}</div>${ev.raw_quote ? `<blockquote>${escapeHtml(ev.raw_quote)}</blockquote>` : ""}</article>`).join("")}</div>`
+        : "";
+      sections.push(`<section><h2>Research Overview</h2><div class="topic">${escapeHtml(analysis.research_topic)}</div>${analysis.objective ? `<div class="objective">${escapeHtml(analysis.objective)}</div>` : ""}<p>${escapeHtml(analysis.summary)}</p>${findings}${evidence}</section>`);
+    }
+
+    if (groundedReport) {
+      const paragraphs = groundedReport.paragraphs.map((paragraph) => {
+        const claims = paragraph.claims.filter((claim) => claim.type !== "narrative");
+        const claimHtml = claims.length
+          ? `<div class="claims">${claims.map((claim) => `<div class="claim"><span class="claim-type">${escapeHtml(claim.type)}</span><span>${escapeHtml(claim.text)}</span>${claim.evidence_ids.length ? `<div class="meta">Evidence · ${escapeHtml(claim.evidence_ids.join(", "))}</div>` : ""}${claim.citation_required ? `<div class="citation">Citation Needed</div>` : ""}</div>`).join("")}</div>`
+          : "";
+        return `<article class="report-paragraph"><p>${escapeHtml(paragraph.text)}</p>${claimHtml}</article>`;
+      }).join("");
+      sections.push(`<section><h2>기존 보고서 Evidence 연결 결과</h2><div class="stats"><span>Claims ${groundedReport.stats.total_claims}</span><span>Internal ${groundedReport.stats.internally_supported}</span><span>Citation Needed ${groundedReport.stats.citation_needed}</span><span>Unsupported ${groundedReport.stats.unsupported}</span></div>${paragraphs}</section>`);
+    }
+
+    if (report) {
+      const reportSections = report.sections.map((section) => `<div class="report-section"><h3>${escapeHtml(section.heading)}</h3>${section.paragraphs.map((paragraph) => `<p>${escapeHtml(paragraph.text)}</p>`).join("")}</div>`).join("");
+      sections.push(`<section><h2>생성·개선 보고서</h2><div class="topic">${escapeHtml(report.title)}</div>${reportSections}</section>`);
+    }
+
+    if (paperPayload?.papers.length) {
+      const papers = paperPayload.papers.map((paper, index) => {
+        const meta = [paper.year, paper.authors.join(", "), paper.venue].filter(Boolean).map(escapeHtml).join(" · ");
+        const concepts = paper.matched_concepts.map((concept) => concept.name).join(", ");
+        return `<article class="paper"><div class="paper-rank">${index + 1}</div><div><strong>${escapeHtml(paper.title)}</strong>${meta ? `<div class="meta">${meta}</div>` : ""}${concepts ? `<div class="meta">관련 키워드 · ${escapeHtml(concepts)}</div>` : ""}<div class="meta">관련도 점수 · ${escapeHtml(paper.final_score)}</div>${paper.url ? `<a href="${escapeHtml(paper.url)}">${escapeHtml(paper.url)}</a>` : ""}</div></article>`;
+      }).join("");
+      sections.push(`<section><h2>관련 문헌 후보</h2><p class="section-note">검색된 문헌은 관련성 후보이며 실제 인용 전 원문 검토가 필요합니다.</p>${papers}</section>`);
+    }
+
+    return `<div class="export-document">
+      <style>
+        .export-document { width: 760px; box-sizing: border-box; padding: 34px 42px 52px; background: #fff; color: #172033; font-family: Arial, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; font-size: 13px; line-height: 1.65; }
+        .export-document * { box-sizing: border-box; }
+        .export-header { border-bottom: 3px solid #183b66; padding-bottom: 18px; margin-bottom: 24px; }
+        .export-kicker { color: #268a91; font-size: 11px; font-weight: 800; letter-spacing: .08em; }
+        .export-header h1 { margin: 4px 0 8px; color: #15375f; font-size: 28px; line-height: 1.2; }
+        .export-header .meta { margin: 2px 0; }
+        section { margin: 0 0 26px; padding-top: 4px; }
+        h2 { margin: 0 0 13px; padding-bottom: 7px; border-bottom: 1px solid #dfe5ec; color: #15375f; font-size: 18px; }
+        h3 { margin: 18px 0 9px; color: #15375f; font-size: 14px; }
+        p { margin: 7px 0 11px; white-space: pre-wrap; }
+        ol { margin: 0; padding-left: 20px; }
+        li { margin-bottom: 4px; word-break: break-all; }
+        .topic { margin-bottom: 8px; color: #15375f; font-size: 17px; font-weight: 800; }
+        .objective, .section-note { color: #5f6b7b; }
+        .items { display: grid; gap: 8px; }
+        .item, .report-paragraph, .paper { break-inside: avoid; page-break-inside: avoid; border: 1px solid #e2e7ed; border-radius: 7px; padding: 10px 12px; background: #fbfcfe; }
+        .badge, .claim-type { display: inline-block; margin-bottom: 5px; border-radius: 999px; padding: 2px 7px; background: #eaf3f4; color: #24747b; font-size: 10px; font-weight: 800; }
+        .meta { color: #687587; font-size: 10px; word-break: break-all; }
+        .evidence-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 5px; color: #15375f; }
+        blockquote { margin: 7px 0 0; padding: 7px 9px; border-left: 3px solid #9dc7ca; background: #fff; color: #4e5a69; white-space: pre-wrap; }
+        .stats { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 12px; }
+        .stats span { border-radius: 999px; padding: 4px 8px; background: #f0f3f7; font-size: 10px; font-weight: 700; }
+        .claims { display: grid; gap: 6px; margin-top: 8px; }
+        .claim { border-top: 1px solid #e7ebf0; padding-top: 7px; }
+        .citation { display: inline-block; margin-top: 4px; border-radius: 4px; padding: 2px 6px; background: #fff4df; color: #9a5a00; font-size: 10px; font-weight: 800; }
+        .report-section { break-inside: auto; page-break-inside: auto; }
+        .paper { display: grid; grid-template-columns: 28px 1fr; gap: 9px; margin-bottom: 7px; }
+        .paper-rank { color: #268a91; font-size: 16px; font-weight: 900; }
+        a { color: #175e9c; text-decoration: underline; word-break: break-all; }
+        .export-footer { margin-top: 28px; padding-top: 14px; border-top: 1px solid #dfe5ec; color: #687587; font-size: 10px; }
+      </style>
+      <header class="export-header"><div class="export-kicker">RESEARCH2REPORT EXPORT</div><h1>Research2Report 산출물</h1><div class="meta">작성자 · 24100017 신현종</div><div class="meta">내보낸 시각 · ${escapeHtml(new Date().toLocaleString("ko-KR"))}</div></header>
+      ${sections.join("")}
+      <footer class="export-footer">생성형 AI 결과는 최종 사용 전 Evidence와 원문을 확인해야 합니다. 관련 문헌은 검색 후보이며 실제 인용 전 원문 검토가 필요합니다.</footer>
+    </div>`;
+  }
+
+  function downloadTextArtifacts() {
     if (!analysis && !groundedReport && !report && !paperPayload) return;
     setDownloading(true);
     setError("");
     try {
-      const zip = new JSZip();
-      const exportedAt = new Date().toISOString();
-      const contents: string[] = [];
-
-      const manifestRows = files.map((file) => [displayPath(file), file.size, extensionOf(file.name)]);
-      if (manifestRows.length) {
-        zip.file(
-          "sources_manifest.csv",
-          ["path,size_bytes,extension", ...manifestRows.map((row) => row.map(csvCell).join(","))].join("\n"),
-        );
-        contents.push("sources_manifest.csv — 선택한 원자료 목록");
-      }
-
-      if (analysis) {
-        zip.file("research_analysis.json", JSON.stringify(analysis, null, 2));
-        zip.file(
-          "evidence.csv",
-          [
-            "id,type,content,source_name,source_location,raw_quote",
-            ...analysis.evidence.map((ev) =>
-              [ev.id, ev.type, ev.content, ev.source_name, ev.source_location, ev.raw_quote].map(csvCell).join(","),
-            ),
-          ].join("\n"),
-        );
-        zip.file(
-          "research_overview.md",
-          [
-            `# ${analysis.research_topic}`,
-            "",
-            analysis.summary,
-            "",
-            "## 주요 Finding",
-            ...analysis.findings.map((finding) =>
-              `- ${finding.kind === "observed" ? "관찰" : "해석"}: ${finding.text}${finding.evidence_ids.length ? ` (${finding.evidence_ids.join(", ")})` : ""}`,
-            ),
-            "",
-            "## Research Concepts",
-            ...analysis.concepts.map((concept, index) => `${index + 1}. ${concept.name_en} / ${concept.name_ko}`),
-          ].join("\n"),
-        );
-        contents.push("research_overview.md — Research Overview");
-        contents.push("evidence.csv — Evidence 목록 및 원자료 위치");
-        contents.push("research_analysis.json — 전체 분석 데이터");
-      }
-
-      if (existingReportText.trim()) {
-        zip.file("existing_report_original.txt", existingReportText);
-        contents.push("existing_report_original.txt — 입력한 기존 보고서 원문");
-      }
-
-      if (groundedReport) {
-        zip.file("grounded_report.md", groundedReportToMarkdown(groundedReport));
-        zip.file("grounded_report.json", JSON.stringify(groundedReport, null, 2));
-        contents.push("grounded_report.md/json — 기존 보고서 Claim ↔ Evidence 연결 결과");
-      }
-
-      if (report) {
-        zip.file("generated_report.md", reportToMarkdown(report));
-        zip.file("generated_report.json", JSON.stringify(report, null, 2));
-        contents.push("generated_report.md/json — 생성 또는 개선된 보고서");
-      }
-
-      if (paperPayload) {
-        zip.file("literature_candidates.json", JSON.stringify(paperPayload, null, 2));
-        zip.file(
-          "literature_candidates.csv",
-          [
-            "rank,title,year,authors,venue,doi,url,cited_by_count,matched_concepts,score",
-            ...paperPayload.papers.map((paper, index) =>
-              [
-                index + 1,
-                paper.title,
-                paper.year,
-                paper.authors.join("; "),
-                paper.venue,
-                paper.doi,
-                paper.url,
-                paper.cited_by_count,
-                paper.matched_concepts.map((concept) => concept.name).join("; "),
-                paper.final_score,
-              ].map(csvCell).join(","),
-            ),
-          ].join("\n"),
-        );
-        contents.push("literature_candidates.csv/json — 관련 문헌 후보와 링크");
-      }
-
-      zip.file(
-        "README.txt",
-        [
-          "Research2Report 산출물 내보내기",
-          `작성자: 24100017 신현종`,
-          `내보낸 시각: ${exportedAt}`,
-          "",
-          "포함 파일",
-          ...contents.map((item) => `- ${item}`),
-          "",
-          "주의: 관련 문헌은 검색 후보이며, 실제 주장 인용 전 원문 확인이 필요합니다.",
-          "주의: 생성형 AI 결과는 최종 제출 전 사용자가 Evidence와 원문을 확인해야 합니다.",
-        ].join("\n"),
-      );
-
-      const blob = await zip.generateAsync({ type: "blob" });
+      const blob = new Blob([buildArtifactText()], { type: "text/plain;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `Research2Report_artifacts_${new Date().toISOString().slice(0, 10)}.zip`;
+      anchor.download = `Research2Report_${new Date().toISOString().slice(0, 10)}.txt`;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
+      setShowDownloadMenu(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "산출물 다운로드 오류");
+      setError(e instanceof Error ? e.message : "TXT 다운로드 오류");
     } finally {
+      setDownloading(false);
+    }
+  }
+
+  async function downloadPdfArtifacts() {
+    if (!analysis && !groundedReport && !report && !paperPayload) return;
+    setDownloading(true);
+    setError("");
+    let container: HTMLDivElement | null = null;
+    try {
+      const module = await import("html2pdf.js");
+      const html2pdf = (module.default || module) as any;
+      if (document.fonts?.ready) await document.fonts.ready;
+
+      container = document.createElement("div");
+      container.style.position = "fixed";
+      container.style.left = "-10000px";
+      container.style.top = "0";
+      container.style.width = "760px";
+      container.style.background = "#fff";
+      container.innerHTML = buildArtifactHtml();
+      document.body.appendChild(container);
+
+      await html2pdf()
+        .set({
+          margin: [8, 8, 10, 8],
+          filename: `Research2Report_${new Date().toISOString().slice(0, 10)}.pdf`,
+          image: { type: "jpeg", quality: 0.97 },
+          html2canvas: { scale: 2, useCORS: true, backgroundColor: "#ffffff", logging: false },
+          jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+          pagebreak: { mode: ["css", "legacy"] },
+          enableLinks: true,
+        })
+        .from(container)
+        .save();
+      setShowDownloadMenu(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "PDF 다운로드 오류");
+    } finally {
+      container?.remove();
       setDownloading(false);
     }
   }
@@ -725,9 +829,22 @@ export default function HomePage() {
             <button type="button" className={showGuide ? "utility-button active" : "utility-button"} onClick={() => setShowGuide((value) => !value)}>
               사용법
             </button>
-            <button type="button" className="utility-button download-button" onClick={downloadArtifacts} disabled={!hasDownloadableArtifacts || downloading}>
-              {downloading ? "준비 중..." : "산출물 다운로드"}
-            </button>
+            <div className="download-menu-wrap">
+              <button
+                type="button"
+                className={showDownloadMenu ? "utility-button download-button active" : "utility-button download-button"}
+                onClick={() => setShowDownloadMenu((value) => !value)}
+                disabled={!hasDownloadableArtifacts || downloading}
+              >
+                {downloading ? "생성 중..." : "산출물 다운로드"}
+              </button>
+              {showDownloadMenu && !downloading && (
+                <div className="download-menu">
+                  <button type="button" onClick={downloadPdfArtifacts}><strong>PDF</strong><span>보기 좋은 문서 형태</span></button>
+                  <button type="button" onClick={downloadTextArtifacts}><strong>TXT</strong><span>전체 내용을 텍스트로 저장</span></button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </header>
@@ -745,7 +862,7 @@ export default function HomePage() {
             <div className="guide-card"><strong>1. 자료 입력</strong><span>파일 또는 프로젝트 폴더를 선택합니다.</span></div>
             <div className="guide-card"><strong>2. Evidence 분석</strong><span>빠른/정밀 분석으로 핵심 결과와 원자료 위치를 구조화합니다.</span></div>
             <div className="guide-card"><strong>3. 보고서 작업</strong><span>기존 보고서에 Evidence를 연결하거나 새 보고서를 생성합니다.</span></div>
-            <div className="guide-card"><strong>4. 문헌·다운로드</strong><span>관련 문헌 후보를 확인하고 현재 산출물을 ZIP으로 저장합니다.</span></div>
+            <div className="guide-card"><strong>4. 문헌·다운로드</strong><span>관련 문헌 후보를 확인하고 현재 산출물을 PDF 또는 TXT로 저장합니다.</span></div>
           </div>
           <div className="guide-note">관련 문헌은 후보 목록이며 실제 인용 전 원문 확인이 필요합니다. 생성형 AI 결과도 최종 제출 전 Evidence와 원문을 확인하세요.</div>
         </section>

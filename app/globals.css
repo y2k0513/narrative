@@ -235,6 +235,8 @@ footer { margin-top: 24px; color: var(--muted); font-size: 12px; line-height: 1.
 
 /* Screen capture export: keep the site layout, but expand scroll-only result areas. */
 .page-shell.capture-mode .download-menu { display: none !important; }
+.page-shell.capture-mode .author-line,
+.page-shell.capture-mode > footer { display: none !important; }
 .page-shell.capture-mode .concept-list,
 .page-shell.capture-mode .selected-file-list { max-height: none !important; overflow: visible !important; }
 .page-shell.capture-mode .evidence-panel { position: static !important; }

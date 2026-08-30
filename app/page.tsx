@@ -580,7 +580,6 @@ export default function HomePage() {
   function buildArtifactText() {
     const lines: string[] = [
       "Research2Report 산출물",
-      "작성자: 24100017 신현종",
       `내보낸 시각: ${new Date().toLocaleString("ko-KR")}`,
       "",
     ];
@@ -744,7 +743,7 @@ export default function HomePage() {
         a { color: #175e9c; text-decoration: underline; word-break: break-all; }
         .export-footer { margin-top: 28px; padding-top: 14px; border-top: 1px solid #dfe5ec; color: #687587; font-size: 10px; }
       </style>
-      <header class="export-header"><div class="export-kicker">RESEARCH2REPORT EXPORT</div><h1>${reportOnly ? "Research2Report 보고서" : "Research2Report 산출물"}</h1><div class="meta">작성자 · 24100017 신현종</div><div class="meta">내보낸 시각 · ${escapeHtml(new Date().toLocaleString("ko-KR"))}</div></header>
+      <header class="export-header"><div class="export-kicker">RESEARCH2REPORT EXPORT</div><h1>${reportOnly ? "Research2Report 보고서" : "Research2Report 산출물"}</h1><div class="meta">내보낸 시각 · ${escapeHtml(new Date().toLocaleString("ko-KR"))}</div></header>
       ${sections.join("")}
       <footer class="export-footer">${reportOnly ? "생성형 AI로 작성된 문장은 최종 제출 전 원자료와 근거를 확인해 주세요." : "생성형 AI 결과는 최종 사용 전 Evidence와 원문을 확인해야 합니다. 관련 문헌은 검색 후보이며 실제 인용 전 원문 검토가 필요합니다."}</footer>
     </div>`;
@@ -786,7 +785,6 @@ export default function HomePage() {
           children: [new TextRun({ text: reportOnly ? "Research2Report 보고서" : "Research2Report 분석 산출물", bold: true, size: 38, color: "173F76" })],
           spacing: { after: 120 },
         }),
-        muted("작성자 · 24100017 신현종"),
         muted(`내보낸 시각 · ${new Date().toLocaleString("ko-KR")}`),
       );
 
@@ -947,6 +945,8 @@ export default function HomePage() {
     if (scope === "all" && !pageTarget) return;
     let tempTarget: HTMLElement | null = null;
     let target: HTMLElement | null = pageTarget;
+    let hiddenAuthorLine: HTMLElement | null = null;
+    let previousAuthorDisplay = "";
     setDownloading(true);
     setError("");
     try {
@@ -968,6 +968,9 @@ export default function HomePage() {
       }
       if (!target) throw new Error("PNG로 저장할 내용을 찾지 못했습니다.");
 
+      hiddenAuthorLine = scope === "all" ? target.querySelector(".author-line") as HTMLElement | null : null;
+      previousAuthorDisplay = hiddenAuthorLine?.style.display ?? "";
+      if (hiddenAuthorLine) hiddenAuthorLine.style.display = "none";
       if (scope === "all") target.classList.add("capture-mode");
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 
@@ -999,6 +1002,7 @@ export default function HomePage() {
       setError(e instanceof Error ? e.message : "PNG 다운로드 오류");
     } finally {
       if (pageTarget) pageTarget.classList.remove("capture-mode");
+      if (hiddenAuthorLine) hiddenAuthorLine.style.display = previousAuthorDisplay;
       if (tempTarget?.parentNode) tempTarget.parentNode.removeChild(tempTarget);
       setDownloading(false);
     }

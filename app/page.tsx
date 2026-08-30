@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import JSZip from "jszip";
 import {
   buildAnalysisBatches,
   CODE_EXTENSIONS,
@@ -46,13 +47,13 @@ const ANALYSIS_PROFILES: Record<AnalysisDepth, {
 }> = {
   fast: {
     label: "빠른 분석",
-    description: "전체 자료를 전수 스캔한 뒤 핵심 Evidence 중심으로 압축 · 약 2~3 AI 배치",
+    description: "핵심 Evidence 중심 · 속도 우선",
     targetBatches: 3,
     targetChars: 360_000,
   },
   precise: {
     label: "정밀 분석",
-    description: "원문 Evidence와 실험 조건을 약 2배 더 보존 · 약 4~5 AI 배치",
+    description: "원문 Evidence와 실험 조건을 더 많이 보존 · 상세도 우선",
     targetBatches: 5,
     targetChars: 680_000,
   },
@@ -142,6 +143,8 @@ export default function HomePage() {
   const [uploadNotice, setUploadNotice] = useState("");
   const [analysisProgress, setAnalysisProgress] = useState("");
   const [analysisDepth, setAnalysisDepth] = useState<AnalysisDepth>("fast");
+  const [showGuide, setShowGuide] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   const evidenceMap = useMemo(() => {
     const map = new Map<string, Evidence>();
@@ -191,15 +194,15 @@ export default function HomePage() {
 
     const messages: string[] = [];
     if (source === "folder") {
-      messages.push(`폴더에서 분석 가능한 파일 ${accepted.length}개를 추가했습니다.`);
-      if (unsupported) messages.push(`모델/바이너리/빌드 산출물 등 ${unsupported}개는 제외했습니다.`);
-      if (oversized) messages.push(`40MB를 넘는 분석 파일 ${oversized}개는 제외했습니다.`);
+      messages.push(`폴더 파일 ${accepted.length}개 추가`);
+      if (unsupported) messages.push(`지원 형식 외 ${unsupported}개 제외`);
+      if (oversized) messages.push(`40MB 초과 ${oversized}개 제외`);
     } else {
-      if (accepted.length) messages.push(`파일 ${accepted.length}개를 추가했습니다.`);
-      if (unsupported) messages.push(`지원하지 않는 파일 ${unsupported}개는 제외했습니다.`);
-      if (oversized) messages.push(`80MB를 넘는 ZIP ${oversized}개는 제외했습니다. 큰 프로젝트는 폴더 선택을 사용하세요.`);
+      if (accepted.length) messages.push(`파일 ${accepted.length}개 추가`);
+      if (unsupported) messages.push(`지원 형식 외 ${unsupported}개 제외`);
+      if (oversized) messages.push(`ZIP 80MB 초과 ${oversized}개 제외`);
     }
-    if (overLimit) messages.push(`분석 대상은 최대 ${MAX_SELECTED_FILES}개라 ${overLimit}개를 추가하지 않았습니다.`);
+    if (overLimit) messages.push(`최대 ${MAX_SELECTED_FILES}개 · ${overLimit}개 제외`);
     setUploadNotice(messages.join(" "));
   }
 
@@ -533,6 +536,174 @@ export default function HomePage() {
     }
   }
 
+  function csvCell(value: unknown) {
+    const text = value == null ? "" : String(value);
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  function reportToMarkdown(draft: ReportDraft) {
+    const lines: string[] = [`# ${draft.title}`, ""];
+    for (const section of draft.sections) {
+      lines.push(`## ${section.heading}`, "");
+      for (const paragraph of section.paragraphs) {
+        lines.push(paragraph.text, "");
+        const claims = paragraph.claims.filter((claim) => claim.type !== "narrative");
+        if (claims.length) {
+          for (const claim of claims) {
+            lines.push(`- [${claim.id}] ${claim.type} · ${claim.text}`);
+            if (claim.evidence_ids.length) lines.push(`  - Evidence: ${claim.evidence_ids.join(", ")}`);
+            if (claim.citation_required) lines.push("  - Citation Needed");
+          }
+          lines.push("");
+        }
+      }
+    }
+    if (draft.warnings.length) {
+      lines.push("## Warnings", "", ...draft.warnings.map((warning) => `- ${warning}`), "");
+    }
+    return lines.join("\n");
+  }
+
+  function groundedReportToMarkdown(grounded: GroundedReport) {
+    const lines: string[] = [`# ${grounded.title}`, "", `Source: ${grounded.source_name}`, ""];
+    for (const paragraph of grounded.paragraphs) {
+      lines.push(paragraph.text, "");
+      const claims = paragraph.claims.filter((claim) => claim.type !== "narrative");
+      for (const claim of claims) {
+        lines.push(`- [${claim.id}] ${claim.type} · ${claim.text}`);
+        if (claim.evidence_ids.length) lines.push(`  - Evidence: ${claim.evidence_ids.join(", ")}`);
+        if (claim.citation_required) lines.push("  - Citation Needed");
+      }
+      if (claims.length) lines.push("");
+    }
+    return lines.join("\n");
+  }
+
+  async function downloadArtifacts() {
+    if (!analysis && !groundedReport && !report && !paperPayload) return;
+    setDownloading(true);
+    setError("");
+    try {
+      const zip = new JSZip();
+      const exportedAt = new Date().toISOString();
+      const contents: string[] = [];
+
+      const manifestRows = files.map((file) => [displayPath(file), file.size, extensionOf(file.name)]);
+      if (manifestRows.length) {
+        zip.file(
+          "sources_manifest.csv",
+          ["path,size_bytes,extension", ...manifestRows.map((row) => row.map(csvCell).join(","))].join("\n"),
+        );
+        contents.push("sources_manifest.csv — 선택한 원자료 목록");
+      }
+
+      if (analysis) {
+        zip.file("research_analysis.json", JSON.stringify(analysis, null, 2));
+        zip.file(
+          "evidence.csv",
+          [
+            "id,type,content,source_name,source_location,raw_quote",
+            ...analysis.evidence.map((ev) =>
+              [ev.id, ev.type, ev.content, ev.source_name, ev.source_location, ev.raw_quote].map(csvCell).join(","),
+            ),
+          ].join("\n"),
+        );
+        zip.file(
+          "research_overview.md",
+          [
+            `# ${analysis.research_topic}`,
+            "",
+            analysis.summary,
+            "",
+            "## 주요 Finding",
+            ...analysis.findings.map((finding) =>
+              `- ${finding.kind === "observed" ? "관찰" : "해석"}: ${finding.text}${finding.evidence_ids.length ? ` (${finding.evidence_ids.join(", ")})` : ""}`,
+            ),
+            "",
+            "## Research Concepts",
+            ...analysis.concepts.map((concept, index) => `${index + 1}. ${concept.name_en} / ${concept.name_ko}`),
+          ].join("\n"),
+        );
+        contents.push("research_overview.md — Research Overview");
+        contents.push("evidence.csv — Evidence 목록 및 원자료 위치");
+        contents.push("research_analysis.json — 전체 분석 데이터");
+      }
+
+      if (existingReportText.trim()) {
+        zip.file("existing_report_original.txt", existingReportText);
+        contents.push("existing_report_original.txt — 입력한 기존 보고서 원문");
+      }
+
+      if (groundedReport) {
+        zip.file("grounded_report.md", groundedReportToMarkdown(groundedReport));
+        zip.file("grounded_report.json", JSON.stringify(groundedReport, null, 2));
+        contents.push("grounded_report.md/json — 기존 보고서 Claim ↔ Evidence 연결 결과");
+      }
+
+      if (report) {
+        zip.file("generated_report.md", reportToMarkdown(report));
+        zip.file("generated_report.json", JSON.stringify(report, null, 2));
+        contents.push("generated_report.md/json — 생성 또는 개선된 보고서");
+      }
+
+      if (paperPayload) {
+        zip.file("literature_candidates.json", JSON.stringify(paperPayload, null, 2));
+        zip.file(
+          "literature_candidates.csv",
+          [
+            "rank,title,year,authors,venue,doi,url,cited_by_count,matched_concepts,score",
+            ...paperPayload.papers.map((paper, index) =>
+              [
+                index + 1,
+                paper.title,
+                paper.year,
+                paper.authors.join("; "),
+                paper.venue,
+                paper.doi,
+                paper.url,
+                paper.cited_by_count,
+                paper.matched_concepts.map((concept) => concept.name).join("; "),
+                paper.final_score,
+              ].map(csvCell).join(","),
+            ),
+          ].join("\n"),
+        );
+        contents.push("literature_candidates.csv/json — 관련 문헌 후보와 링크");
+      }
+
+      zip.file(
+        "README.txt",
+        [
+          "Research2Report 산출물 내보내기",
+          `작성자: 24100017 신현종`,
+          `내보낸 시각: ${exportedAt}`,
+          "",
+          "포함 파일",
+          ...contents.map((item) => `- ${item}`),
+          "",
+          "주의: 관련 문헌은 검색 후보이며, 실제 주장 인용 전 원문 확인이 필요합니다.",
+          "주의: 생성형 AI 결과는 최종 제출 전 사용자가 Evidence와 원문을 확인해야 합니다.",
+        ].join("\n"),
+      );
+
+      const blob = await zip.generateAsync({ type: "blob" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `Research2Report_artifacts_${new Date().toISOString().slice(0, 10)}.zip`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "산출물 다운로드 오류");
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  const hasDownloadableArtifacts = Boolean(analysis || groundedReport || report || paperPayload);
+
   const selectedEvidence = selectedClaim?.evidence_ids
     .map((id) => evidenceMap.get(id))
     .filter(Boolean) as Evidence[] | undefined;
@@ -541,22 +712,51 @@ export default function HomePage() {
     <main className="page-shell">
       <header className="hero">
         <div>
-          <div className="eyebrow">SEOULTECH AI NARRATIVE MVP</div>
+          <div className="eyebrow">SEOULTECH AI NARRATIVE</div>
           <h1>Research2Report</h1>
           <p>
-            이미 작성한 보고서가 있다면 <strong>원문을 유지한 채 연구자료 근거와 연결</strong>하고,
-            보고서가 없다면 Evidence 기반 초안을 생성합니다.
+            파일·폴더에서 Evidence를 만들고, 기존 보고서의 주장과 연결하거나 Evidence 기반 새 보고서를 작성합니다.
+            필요하면 관련 문헌 후보까지 함께 탐색합니다.
           </p>
         </div>
-        <div className="hero-badge">Report ↔ Evidence · Draft when needed</div>
+        <div className="hero-side">
+          <div className="author-line">24100017 신현종</div>
+          <div className="hero-actions">
+            <button type="button" className={showGuide ? "utility-button active" : "utility-button"} onClick={() => setShowGuide((value) => !value)}>
+              사용법
+            </button>
+            <button type="button" className="utility-button download-button" onClick={downloadArtifacts} disabled={!hasDownloadableArtifacts || downloading}>
+              {downloading ? "준비 중..." : "산출물 다운로드"}
+            </button>
+          </div>
+        </div>
       </header>
+
+      {showGuide && (
+        <section className="guide-panel">
+          <div className="guide-head">
+            <div>
+              <span className="eyebrow">QUICK GUIDE</span>
+              <h2>사용법</h2>
+            </div>
+            <button type="button" className="guide-close" onClick={() => setShowGuide(false)}>닫기</button>
+          </div>
+          <div className="guide-grid">
+            <div className="guide-card"><strong>1. 자료 입력</strong><span>파일 또는 프로젝트 폴더를 선택합니다.</span></div>
+            <div className="guide-card"><strong>2. Evidence 분석</strong><span>빠른/정밀 분석으로 핵심 결과와 원자료 위치를 구조화합니다.</span></div>
+            <div className="guide-card"><strong>3. 보고서 작업</strong><span>기존 보고서에 Evidence를 연결하거나 새 보고서를 생성합니다.</span></div>
+            <div className="guide-card"><strong>4. 문헌·다운로드</strong><span>관련 문헌 후보를 확인하고 현재 산출물을 ZIP으로 저장합니다.</span></div>
+          </div>
+          <div className="guide-note">관련 문헌은 후보 목록이며 실제 인용 전 원문 확인이 필요합니다. 생성형 AI 결과도 최종 제출 전 Evidence와 원문을 확인하세요.</div>
+        </section>
+      )}
 
       {error && <div className="error-box">{error}</div>}
 
       <section className="panel">
         <div className="section-heading">
           <div><span className="step">01</span><h2>연구 근거자료 업로드</h2></div>
-          <span className="muted">브라우저 전처리 · 원본 대용량 업로드 없음</span>
+          <span className="muted">최대 150개</span>
         </div>
         <div className="upload-grid">
           <label className="drop-zone">
@@ -570,7 +770,7 @@ export default function HomePage() {
               }}
             />
             <strong>파일 추가</strong>
-            <span>여러 번 선택해도 누적됩니다. ZIP은 80MB 이하, 큰 프로젝트는 폴더 선택을 권장합니다.</span>
+            <span>PDF · CSV · JSON/YAML · LOG · TXT/MD · ZIP · 주요 코드 / ZIP ≤ 80MB</span>
           </label>
 
           <label className="drop-zone folder-zone">
@@ -584,13 +784,13 @@ export default function HomePage() {
               }}
             />
             <strong>프로젝트 폴더 추가</strong>
-            <span>소스코드/문서만 브라우저에서 읽고 .pt/.pth/ckpt·데이터셋·빌드 산출물은 전송하지 않습니다.</span>
+            <span>지원 형식 자동 선별 · 개별 파일 ≤ 40MB</span>
           </label>
         </div>
 
         <div className="upload-summary">
-          <strong>{files.length ? `현재 분석 대상 ${files.length}개` : "아직 선택된 연구자료가 없습니다."}</strong>
-          <span>원본 파일은 Vercel API로 보내지 않고 브라우저에서 텍스트/구조 데이터로 변환한 뒤 작은 배치만 전송합니다.</span>
+          <strong>{files.length ? `분석 대상 ${files.length}개` : "선택된 자료 없음"}</strong>
+          <span>지원 형식: 문서 · 데이터 · 로그 · 코드</span>
         </div>
 
         {uploadNotice && <div className="upload-notice">{uploadNotice}</div>}
@@ -629,7 +829,7 @@ export default function HomePage() {
               disabled={busy !== null}
             >
               <strong>빠른 분석</strong>
-              <small>현재 기본 · 약 2~3 배치</small>
+              <small>핵심 Evidence 중심</small>
             </button>
             <button
               type="button"
@@ -638,7 +838,7 @@ export default function HomePage() {
               disabled={busy !== null}
             >
               <strong>정밀 분석</strong>
-              <small>Evidence 약 2배 보존 · 약 4~5 배치</small>
+              <small>세부 Evidence·조건 보존</small>
             </button>
           </div>
         </div>
@@ -959,7 +1159,7 @@ export default function HomePage() {
       )}
 
       <footer>
-        기본 흐름: 연구자료 전체를 브라우저에서 Full Coverage Scan → 계층 압축 → 병렬 AI 해석합니다. 기존 보고서가 있으면 원문을 Evidence와 연결하고, 없을 때만 새 초안을 생성합니다.
+        Research2Report · 24100017 신현종 · Evidence 기반 보고서 검증·작성
       </footer>
     </main>
   );
